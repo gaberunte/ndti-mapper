@@ -7,14 +7,21 @@ import matplotlib.patches as mpatches
 import matplotlib.pyplot as plt
 import numpy as np
 import rasterio
-from matplotlib.colors import BoundaryNorm, ListedColormap
+from matplotlib.colors import BoundaryNorm, ListedColormap, to_hex
 from matplotlib_scalebar.scalebar import ScaleBar
 from PIL import Image
 from rasterio.io import MemoryFile
 from rasterio.shutil import copy as rio_copy
 
-CLASS_COLORS = ["#8c510a", "#d8b365", "#80cdc1", "#01665e"]  # bare -> high residue
+# Diverging brown -> teal colormap (bare -> high residue), same family as the original
+# fixed 4-color palette but sampled to fit however many classes are actually in use.
+_BASE_CMAP = "BrBG"
 NODATA_BYTE = 255
+
+
+def _class_colors(n: int) -> list[str]:
+    cmap = plt.get_cmap(_BASE_CMAP, n)
+    return [to_hex(cmap(i)) for i in range(n)]
 
 
 def _hex_to_rgb(hex_color: str) -> tuple[int, int, int]:
@@ -23,7 +30,8 @@ def _hex_to_rgb(hex_color: str) -> tuple[int, int, int]:
 
 
 def _class_colormap(n: int) -> dict:
-    cmap = {i: (*_hex_to_rgb(CLASS_COLORS[i]), 255) for i in range(n)}
+    colors = _class_colors(n)
+    cmap = {i: (*_hex_to_rgb(colors[i]), 255) for i in range(n)}
     cmap[NODATA_BYTE] = (255, 255, 255, 0)  # transparent
     return cmap
 
@@ -31,14 +39,15 @@ def _class_colormap(n: int) -> dict:
 def render_preview(classified, aoi_gdf, title="NDTI (scene average)"):
     labels = classified.attrs["labels"]
     n = len(labels)
-    cmap = ListedColormap(CLASS_COLORS[:n])
+    colors = _class_colors(n)
+    cmap = ListedColormap(colors)
     norm = BoundaryNorm(np.arange(-0.5, n + 0.5, 1), cmap.N)
 
     fig, ax = plt.subplots(figsize=(8, 8))
     classified.plot.imshow(ax=ax, cmap=cmap, norm=norm, add_colorbar=False)
     aoi_gdf.to_crs(classified.rio.crs).boundary.plot(ax=ax, edgecolor="black", linewidth=1.2)
 
-    handles = [mpatches.Patch(color=CLASS_COLORS[i], label=labels[i]) for i in range(n)]
+    handles = [mpatches.Patch(color=colors[i], label=labels[i]) for i in range(n)]
     ax.legend(handles=handles, loc="lower left", fontsize=8, framealpha=0.9)
     ax.set_title(title)
     ax.set_axis_off()
@@ -50,6 +59,7 @@ def render_preview(classified, aoi_gdf, title="NDTI (scene average)"):
 def _legend_panel_rgb(labels, title, height_px, width_px=220, dpi=150):
     """Render a title + color-swatch legend as an RGB array, resized to exactly height_px tall."""
     n = len(labels)
+    colors = _class_colors(n)
     fig = plt.figure(figsize=(width_px / dpi, height_px / dpi), dpi=dpi)
     fig.patch.set_facecolor("white")
     ax = fig.add_axes((0, 0, 1, 1))
@@ -58,7 +68,7 @@ def _legend_panel_rgb(labels, title, height_px, width_px=220, dpi=150):
     ax.axis("off")
     ax.text(0.08, 0.95, title, fontsize=10, fontweight="bold", va="top", wrap=True)
 
-    handles = [mpatches.Patch(color=CLASS_COLORS[i], label=labels[i]) for i in range(n)]
+    handles = [mpatches.Patch(color=colors[i], label=labels[i]) for i in range(n)]
     ax.legend(handles=handles, loc="center left", bbox_to_anchor=(0.0, 0.55), frameon=False, fontsize=7.5)
 
     fig.canvas.draw()
@@ -74,10 +84,11 @@ def _classified_to_rgb(classified):
     """Render the classified raster as an RGB array (white background outside the AOI)."""
     labels = classified.attrs["labels"]
     n = len(labels)
+    colors = _class_colors(n)
     data = classified.values
     rgb = np.full((*data.shape, 3), 255, dtype="uint8")
     for i in range(n):
-        rgb[data == i] = _hex_to_rgb(CLASS_COLORS[i])
+        rgb[data == i] = _hex_to_rgb(colors[i])
     return rgb
 
 

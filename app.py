@@ -83,6 +83,19 @@ with st.sidebar:
         b2 = st.number_input("Low residue <", value=0.20, step=0.01, format="%.2f")
         b3 = st.number_input("Moderate residue <", value=0.25, step=0.01, format="%.2f")
         custom_bins = [-1.0, b1, b2, b3, 1.0]
+    else:
+        n_classes = st.number_input(
+            "Number of classes",
+            min_value=2,
+            max_value=10,
+            value=4,
+            step=1,
+            help=(
+                "Quantile classification works for any number of classes, not just 4 — "
+                "n=4/5/10 are traditionally called quartiles/quintiles/deciles, but it's "
+                "the same equal-pixel-count method regardless of n."
+            ),
+        )
 
     st.markdown("**Resolution**")
     resolution_mode = st.radio(
@@ -140,7 +153,7 @@ if aoi_gdf is not None and not aoi_gdf.empty:
     # AOI, scene count, cloud-cover threshold, date range, or resolution changes.
     # Re-binning is cheap, so it's cached separately to keep bin-toggle reruns fast.
     fetch_key = (
-        aoi_gdf.geometry.unary_union.wkb,
+        aoi_gdf.geometry.union_all().wkb,
         n_scenes,
         max_cloud_cover,
         resolution,
@@ -182,22 +195,38 @@ if aoi_gdf is not None and not aoi_gdf.empty:
         if binning_mode == "Custom breaks":
             bins, labels = custom_bins, DEFAULT_LABELS
         elif binning_mode.startswith("Quantile"):
-            bins = quantile_bins(mean_ndti, n_classes=4)
+            bins = quantile_bins(mean_ndti, n_classes=n_classes)
             labels = range_labels(bins)
         else:
-            bins = equal_interval_bins(mean_ndti, n_classes=4)
+            bins = equal_interval_bins(mean_ndti, n_classes=n_classes)
             labels = range_labels(bins)
 
         classified = classify_ndti(mean_ndti, bins=bins, labels=labels)
 
-        fig = render_preview(classified, aoi_gdf)
-        st.pyplot(fig)
-
         with st.spinner("Building georeferenced PDF..."):
             out_dir = tempfile.mkdtemp()
             pdf_path = export_geopdf(classified, out_dir)
+            pdf_bytes = pdf_path.read_bytes()
 
-        with open(pdf_path, "rb") as f:
-            st.download_button("Download georeferenced PDF", f, file_name="ndti_map.pdf", mime="application/pdf")
+        # Stashed in session_state (rather than just rendered here) because Streamlit
+        # reruns the whole script on any widget interaction -- e.g. redrawing the AOI
+        # map -- and st.button() only reads True on the one rerun right after the
+        # click. Rendering straight from this block would make the result vanish on
+        # the very next unrelated interaction.
+        st.session_state["result"] = {
+            "classified": classified,
+            "aoi_gdf": aoi_gdf,
+            "pdf_bytes": pdf_bytes,
+        }
+
+    result = st.session_state.get("result")
+    if result is not None:
+        if result["aoi_gdf"].geometry.union_all().wkb != aoi_gdf.geometry.union_all().wkb:
+            st.caption("Showing results from a previous AOI/run — click \"Run NDTI analysis\" to update.")
+        fig = render_preview(result["classified"], result["aoi_gdf"])
+        st.pyplot(fig)
+        st.download_button(
+            "Download georeferenced PDF", result["pdf_bytes"], file_name="ndti_map.pdf", mime="application/pdf"
+        )
 elif upload is None:
     st.info("Draw a polygon on the map above, or upload a file, then click \"Run NDTI analysis\".")

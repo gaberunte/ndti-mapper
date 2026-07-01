@@ -45,7 +45,7 @@ def search_recent_scenes(
     and "most recent" means the n most recent scenes within it, rather than overall.
     """
     aoi_wgs84 = aoi_gdf.to_crs(4326)
-    geometry = aoi_wgs84.geometry.unary_union
+    geometry = aoi_wgs84.geometry.union_all()
 
     datetime_filter = None
     if start_date or end_date:
