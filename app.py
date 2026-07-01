@@ -126,7 +126,16 @@ if upload is not None:
         tmp_path = tmp.name
     aoi_gdf = gpd.read_file(tmp_path)
 else:
-    m = folium.Map(location=[36.0, -119.5], zoom_start=6)
+    m = folium.Map(location=[36.0, -119.5], zoom_start=6, tiles=None)
+    folium.TileLayer("OpenStreetMap", name="Street (OpenStreetMap)").add_to(m)
+    folium.TileLayer(
+        tiles="https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
+        attr="Tiles &copy; Esri &mdash; Source: Esri, Maxar, Earthstar Geographics, and the GIS User Community",
+        name="Satellite (Esri)",
+        show=False,
+    ).add_to(m)
+    folium.TileLayer("CartoDB positron", name="Light (CartoDB)", show=False).add_to(m)
+    folium.LayerControl(position="topright", collapsed=True).add_to(m)
     Draw(
         export=False,
         draw_options={
