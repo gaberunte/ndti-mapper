@@ -13,3 +13,4 @@ xarray
 numpy
 matplotlib
 matplotlib-scalebar
+Pillow
