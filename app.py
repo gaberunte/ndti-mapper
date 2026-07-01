@@ -10,7 +10,15 @@ from folium.plugins import Draw
 from streamlit_folium import st_folium
 
 from mapping import export_geopdf, render_preview
-from ndti import DEFAULT_LABELS, average_ndti, classify_ndti, load_ndti_stack, search_recent_scenes
+from ndti import (
+    DEFAULT_LABELS,
+    average_ndti,
+    classify_ndti,
+    equal_interval_bins,
+    load_ndti_stack,
+    range_labels,
+    search_recent_scenes,
+)
 
 st.set_page_config(page_title="Sentinel-2 NDTI Mapper", layout="wide")
 st.title("Sentinel-2 NDTI Mapper")
@@ -23,11 +31,18 @@ with st.sidebar:
     st.header("Settings")
     max_cloud_cover = st.slider("Max scene cloud cover (%)", 0, 100, 40)
     n_scenes = st.number_input("Number of recent scenes to average", 1, 10, 3)
-    st.markdown("**NDTI class breaks**")
-    b1 = st.number_input("Bare / high disturbance <", value=0.15, step=0.01, format="%.2f")
-    b2 = st.number_input("Low residue <", value=0.20, step=0.01, format="%.2f")
-    b3 = st.number_input("Moderate residue <", value=0.25, step=0.01, format="%.2f")
-    bins = [-1.0, b1, b2, b3, 1.0]
+
+    st.markdown("**NDTI classes**")
+    binning_mode = st.radio(
+        "Binning mode",
+        ["Auto (equal-interval over this scene's NDTI range)", "Custom breaks"],
+        index=0,
+    )
+    if binning_mode == "Custom breaks":
+        b1 = st.number_input("Bare / high disturbance <", value=0.15, step=0.01, format="%.2f")
+        b2 = st.number_input("Low residue <", value=0.20, step=0.01, format="%.2f")
+        b3 = st.number_input("Moderate residue <", value=0.25, step=0.01, format="%.2f")
+        custom_bins = [-1.0, b1, b2, b3, 1.0]
 
 st.subheader("1. Define your area of interest")
 upload = st.file_uploader(
@@ -60,18 +75,36 @@ else:
 if aoi_gdf is not None and not aoi_gdf.empty:
     st.success(f"AOI loaded: {len(aoi_gdf)} feature(s).")
 
-    if st.button("2. Run NDTI analysis", type="primary"):
-        with st.spinner("Searching for recent Sentinel-2 scenes..."):
-            items = search_recent_scenes(aoi_gdf, n_scenes=n_scenes, max_cloud_cover=max_cloud_cover)
-        st.write(
-            f"Using {len(items)} scene(s): "
-            + ", ".join(i.properties["datetime"][:10] for i in items)
-        )
+    # Only the imagery pull (STAC search + band load) needs to be redone when the
+    # AOI, scene count, or cloud-cover threshold changes. Re-binning is cheap, so it's
+    # cached separately to keep bin-toggle reruns fast.
+    fetch_key = (aoi_gdf.geometry.unary_union.wkb, n_scenes, max_cloud_cover)
 
-        with st.spinner("Loading bands and computing NDTI..."):
-            stack = load_ndti_stack(items, aoi_gdf)
-            mean_ndti = average_ndti(stack)
-            classified = classify_ndti(mean_ndti, bins=bins, labels=DEFAULT_LABELS)
+    if st.button("2. Run NDTI analysis", type="primary"):
+        if st.session_state.get("fetch_key") == fetch_key:
+            st.info("Reusing already-fetched imagery for this AOI/settings — only re-binning.")
+            mean_ndti = st.session_state["mean_ndti"]
+        else:
+            with st.spinner("Searching for recent Sentinel-2 scenes..."):
+                items = search_recent_scenes(aoi_gdf, n_scenes=n_scenes, max_cloud_cover=max_cloud_cover)
+            st.write(
+                f"Using {len(items)} scene(s): "
+                + ", ".join(i.properties["datetime"][:10] for i in items)
+            )
+            with st.spinner("Loading bands and computing NDTI..."):
+                stack = load_ndti_stack(items, aoi_gdf)
+                mean_ndti = average_ndti(stack)
+
+            st.session_state["fetch_key"] = fetch_key
+            st.session_state["mean_ndti"] = mean_ndti
+
+        if binning_mode == "Custom breaks":
+            bins, labels = custom_bins, DEFAULT_LABELS
+        else:
+            bins = equal_interval_bins(mean_ndti, n_classes=4)
+            labels = range_labels(bins)
+
+        classified = classify_ndti(mean_ndti, bins=bins, labels=labels)
 
         fig = render_preview(classified, aoi_gdf)
         st.pyplot(fig)

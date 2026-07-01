@@ -77,6 +77,19 @@ def average_ndti(ndti_stack: xr.DataArray) -> xr.DataArray:
     return mean
 
 
+def equal_interval_bins(ndti_mean: xr.DataArray, n_classes: int = 4) -> list[float]:
+    """Split this scene's actual NDTI range into n_classes equal-width bins."""
+    values = ndti_mean.values
+    vmin = float(np.nanmin(values))
+    vmax = float(np.nanmax(values))
+    return np.linspace(vmin, vmax, n_classes + 1).tolist()
+
+
+def range_labels(bins: list[float]) -> list[str]:
+    """Generate 'low..high' legend labels from bin edges, e.g. for data-driven bins."""
+    return [f"{bins[i]:.3f} – {bins[i + 1]:.3f}" for i in range(len(bins) - 1)]
+
+
 def classify_ndti(ndti_mean: xr.DataArray, bins=None, labels=None) -> xr.DataArray:
     """Bin the averaged NDTI into discrete classes, preserving nodata as nan."""
     bins = bins if bins is not None else DEFAULT_BINS
