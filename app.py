@@ -69,7 +69,7 @@ with st.sidebar:
             "Quantile (equal pixel count per class)",
             "Custom breaks",
         ],
-        index=0,
+        index=1,
         help=(
             "Equal-interval splits the observed NDTI range into evenly sized steps — "
             "intuitive, but a skewed distribution can leave some classes nearly empty. "
