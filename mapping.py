@@ -1,14 +1,16 @@
 """Rendering: classified raster -> preview figure + true georeferenced PDF export."""
 from __future__ import annotations
 
-import subprocess
 from pathlib import Path
 
 import matplotlib.patches as mpatches
 import matplotlib.pyplot as plt
 import numpy as np
+import rasterio
 from matplotlib.colors import BoundaryNorm, ListedColormap
 from matplotlib_scalebar.scalebar import ScaleBar
+from rasterio.io import MemoryFile
+from rasterio.shutil import copy as rio_copy
 
 CLASS_COLORS = ["#8c510a", "#d8b365", "#80cdc1", "#01665e"]  # bare -> high residue
 
@@ -37,21 +39,33 @@ def export_geotiff(classified, out_path):
 
 
 def export_geopdf(classified, out_dir) -> Path:
-    """Write the classified raster as a GeoTIFF, then convert to a true georeferenced PDF via gdal_translate."""
-    out_dir = Path(out_dir)
-    tif_path = out_dir / "ndti_classified.tif"
-    pdf_path = out_dir / "ndti_classified.pdf"
-    export_geotiff(classified, tif_path)
+    """Write the classified raster as a true georeferenced PDF via rasterio's bundled GDAL.
 
-    subprocess.run(
-        [
-            "gdal_translate",
-            "-of", "PDF",
-            "-co", "GEO_ENCODING=ISO32000",
-            str(tif_path),
-            str(pdf_path),
-        ],
-        check=True,
-        capture_output=True,
+    GDAL's PDF driver only supports CreateCopy (not Create), so we build an
+    in-memory GeoTIFF first and copy it into the PDF driver.
+    """
+    out_dir = Path(out_dir)
+    pdf_path = out_dir / "ndti_classified.pdf"
+
+    # PDF driver only supports 8-bit bands, so classes are cast to uint8
+    # with 255 reserved as the nodata sentinel for masked-out pixels.
+    nodata = 255
+    data = np.where(np.isnan(classified.values), nodata, classified.values).astype("uint8")
+
+    profile = dict(
+        driver="GTiff",
+        height=data.shape[0],
+        width=data.shape[1],
+        count=1,
+        dtype="uint8",
+        crs=classified.rio.crs,
+        transform=classified.rio.transform(),
+        nodata=nodata,
     )
+
+    with MemoryFile() as memfile:
+        with memfile.open(**profile) as mem:
+            mem.write(data, 1)
+        rio_copy(memfile.name, str(pdf_path), driver="PDF", GEO_ENCODING="ISO32000")
+
     return pdf_path
