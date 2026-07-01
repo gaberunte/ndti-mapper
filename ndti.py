@@ -36,22 +36,36 @@ def search_recent_scenes(
     n_scenes: int = 3,
     max_cloud_cover: float = 40,
     max_lookback_items: int = 30,
+    start_date=None,
+    end_date=None,
 ):
-    """Return the n most recent Sentinel-2 L2A STAC items intersecting the AOI."""
+    """Return the n most recent Sentinel-2 L2A STAC items intersecting the AOI.
+
+    If start_date/end_date (date objects) are given, search is bounded to that window
+    and "most recent" means the n most recent scenes within it, rather than overall.
+    """
     aoi_wgs84 = aoi_gdf.to_crs(4326)
     geometry = aoi_wgs84.geometry.unary_union
+
+    datetime_filter = None
+    if start_date or end_date:
+        start_str = start_date.isoformat() if start_date else ".."
+        end_str = end_date.isoformat() if end_date else ".."
+        datetime_filter = f"{start_str}/{end_str}"
 
     catalog = pystac_client.Client.open(STAC_URL, modifier=planetary_computer.sign_inplace)
     search = catalog.search(
         collections=[COLLECTION],
         intersects=geometry.__geo_interface__,
+        datetime=datetime_filter,
         query={"eo:cloud_cover": {"lt": max_cloud_cover}},
         sortby=[{"field": "properties.datetime", "direction": "desc"}],
         max_items=max_lookback_items,
     )
     items = list(search.items())
     if not items:
-        raise ValueError("No Sentinel-2 scenes found for this area/cloud-cover threshold.")
+        window = f" between {start_date} and {end_date}" if datetime_filter else ""
+        raise ValueError(f"No Sentinel-2 scenes found for this area/cloud-cover threshold{window}.")
     return items[:n_scenes]
 
 

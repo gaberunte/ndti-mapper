@@ -1,5 +1,6 @@
 """Streamlit app: draw/upload a polygon, get a binned-NDTI georeferenced PDF
 averaged over the most recent cloud-free Sentinel-2 scenes."""
+import datetime as dt
 import tempfile
 from pathlib import Path
 
@@ -34,6 +35,31 @@ with st.sidebar:
     st.header("Settings")
     max_cloud_cover = st.slider("Max scene cloud cover (%)", 0, 100, 40)
     n_scenes = st.number_input("Number of recent scenes to average", 1, 10, 3)
+
+    st.markdown("**Imagery date range**")
+    date_mode = st.radio(
+        "Date range",
+        ["Recent (default)", "Custom date range"],
+        index=0,
+        help=(
+            "Recent uses whatever the most recent cloud-free scenes are, as of today. "
+            "Custom date range instead searches only within a window you pick — useful "
+            "for looking at a specific past period (e.g. a growing season) rather than "
+            "always the latest imagery."
+        ),
+    )
+    start_date = end_date = None
+    if date_mode == "Custom date range":
+        today = dt.date.today()
+        picked = st.date_input(
+            "Start and end date",
+            value=(today - dt.timedelta(days=180), today),
+            max_value=today,
+        )
+        if isinstance(picked, (tuple, list)) and len(picked) == 2:
+            start_date, end_date = picked
+        else:
+            st.warning("Pick both a start and end date to search within that window.")
 
     st.markdown("**NDTI classes**")
     binning_mode = st.radio(
@@ -111,11 +137,20 @@ if aoi_gdf is not None and not aoi_gdf.empty:
     )
 
     # Only the imagery pull (STAC search + band load) needs to be redone when the
-    # AOI, scene count, cloud-cover threshold, or resolution changes. Re-binning is
-    # cheap, so it's cached separately to keep bin-toggle reruns fast.
-    fetch_key = (aoi_gdf.geometry.unary_union.wkb, n_scenes, max_cloud_cover, resolution)
+    # AOI, scene count, cloud-cover threshold, date range, or resolution changes.
+    # Re-binning is cheap, so it's cached separately to keep bin-toggle reruns fast.
+    fetch_key = (
+        aoi_gdf.geometry.unary_union.wkb,
+        n_scenes,
+        max_cloud_cover,
+        resolution,
+        start_date,
+        end_date,
+    )
 
-    if st.button("2. Run NDTI analysis", type="primary"):
+    date_range_ready = date_mode == "Recent (default)" or (start_date and end_date)
+
+    if st.button("2. Run NDTI analysis", type="primary", disabled=not date_range_ready):
         if st.session_state.get("fetch_key") == fetch_key:
             st.info("Reusing already-fetched imagery for this AOI/settings — only re-binning.")
             mean_ndti = st.session_state["mean_ndti"]
@@ -125,8 +160,14 @@ if aoi_gdf is not None and not aoi_gdf.empty:
                     f"This AOI is large, so imagery is being loaded at {resolution}m/pixel "
                     f"(native is {NATIVE_RESOLUTION}m) to keep memory use bounded."
                 )
-            with st.spinner("Searching for recent Sentinel-2 scenes..."):
-                items = search_recent_scenes(aoi_gdf, n_scenes=n_scenes, max_cloud_cover=max_cloud_cover)
+            with st.spinner("Searching for Sentinel-2 scenes..."):
+                items = search_recent_scenes(
+                    aoi_gdf,
+                    n_scenes=n_scenes,
+                    max_cloud_cover=max_cloud_cover,
+                    start_date=start_date,
+                    end_date=end_date,
+                )
             st.write(
                 f"Using {len(items)} scene(s): "
                 + ", ".join(i.properties["datetime"][:10] for i in items)
