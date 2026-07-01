@@ -12,6 +12,12 @@ from odc.stac import load as odc_load
 STAC_URL = "https://planetarycomputer.microsoft.com/api/stac/v1"
 COLLECTION = "sentinel-2-l2a"
 
+NATIVE_RESOLUTION = 20  # meters; native resolution of the SWIR bands used for NDTI
+# Keeps peak memory in the few-hundred-MB range: a ~56 km^2 real ranch AOI at native
+# resolution (~380k pixels) measured ~310MB peak RSS end-to-end, well under Streamlit
+# Community Cloud's ~1GB ceiling.
+DEFAULT_MAX_PIXELS = 600_000
+
 # Sentinel-2 SCL classes kept as "clear": vegetation, bare soil, unclassified.
 # Excludes cloud/shadow/cirrus/snow/water, which aren't meaningful for a tillage index.
 CLEAR_SCL_CLASSES = [4, 5, 7]
@@ -47,6 +53,24 @@ def search_recent_scenes(
     if not items:
         raise ValueError("No Sentinel-2 scenes found for this area/cloud-cover threshold.")
     return items[:n_scenes]
+
+
+def estimate_resolution(aoi_gdf: gpd.GeoDataFrame, max_pixels: int = DEFAULT_MAX_PIXELS) -> int:
+    """Pick a pixel size (meters) that keeps the AOI's pixel count under max_pixels.
+
+    Stays at Sentinel-2's native 20m for normal-sized properties; coarsens (in 10m
+    steps) for very large AOIs so memory use doesn't scale unbounded with area.
+    """
+    utm = aoi_gdf.to_crs(aoi_gdf.estimate_utm_crs())
+    minx, miny, maxx, maxy = utm.total_bounds
+    width, height = maxx - minx, maxy - miny
+
+    native_pixels = (width / NATIVE_RESOLUTION) * (height / NATIVE_RESOLUTION)
+    if native_pixels <= max_pixels:
+        return NATIVE_RESOLUTION
+
+    needed = NATIVE_RESOLUTION * (native_pixels / max_pixels) ** 0.5
+    return int(np.ceil(needed / 10.0) * 10)
 
 
 def load_ndti_stack(items, aoi_gdf: gpd.GeoDataFrame, resolution: int = 20) -> xr.DataArray:

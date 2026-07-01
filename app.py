@@ -12,9 +12,11 @@ from streamlit_folium import st_folium
 from mapping import export_geopdf, render_preview
 from ndti import (
     DEFAULT_LABELS,
+    NATIVE_RESOLUTION,
     average_ndti,
     classify_ndti,
     equal_interval_bins,
+    estimate_resolution,
     load_ndti_stack,
     quantile_bins,
     range_labels,
@@ -56,6 +58,23 @@ with st.sidebar:
         b3 = st.number_input("Moderate residue <", value=0.25, step=0.01, format="%.2f")
         custom_bins = [-1.0, b1, b2, b3, 1.0]
 
+    st.markdown("**Resolution**")
+    resolution_mode = st.radio(
+        "Resolution mode",
+        ["Auto (coarsens for very large AOIs)", "Custom (meters/pixel)"],
+        index=0,
+        help=(
+            f"Sentinel-2's native resolution for these bands is {NATIVE_RESOLUTION}m/pixel. "
+            "Auto keeps that for normal-sized properties, but coarsens the pixel size for "
+            "very large AOIs so pixel count — and memory use — stays bounded regardless of "
+            "how big the polygon is."
+        ),
+    )
+    if resolution_mode == "Custom (meters/pixel)":
+        custom_resolution = st.number_input(
+            "Meters per pixel", min_value=10, value=NATIVE_RESOLUTION, step=10
+        )
+
 st.subheader("1. Define your area of interest")
 upload = st.file_uploader(
     "Upload a polygon (GeoJSON, KML, or zipped Shapefile)", type=["geojson", "json", "kml", "zip"]
@@ -87,16 +106,25 @@ else:
 if aoi_gdf is not None and not aoi_gdf.empty:
     st.success(f"AOI loaded: {len(aoi_gdf)} feature(s).")
 
+    resolution = (
+        custom_resolution if resolution_mode == "Custom (meters/pixel)" else estimate_resolution(aoi_gdf)
+    )
+
     # Only the imagery pull (STAC search + band load) needs to be redone when the
-    # AOI, scene count, or cloud-cover threshold changes. Re-binning is cheap, so it's
-    # cached separately to keep bin-toggle reruns fast.
-    fetch_key = (aoi_gdf.geometry.unary_union.wkb, n_scenes, max_cloud_cover)
+    # AOI, scene count, cloud-cover threshold, or resolution changes. Re-binning is
+    # cheap, so it's cached separately to keep bin-toggle reruns fast.
+    fetch_key = (aoi_gdf.geometry.unary_union.wkb, n_scenes, max_cloud_cover, resolution)
 
     if st.button("2. Run NDTI analysis", type="primary"):
         if st.session_state.get("fetch_key") == fetch_key:
             st.info("Reusing already-fetched imagery for this AOI/settings — only re-binning.")
             mean_ndti = st.session_state["mean_ndti"]
         else:
+            if resolution > NATIVE_RESOLUTION:
+                st.info(
+                    f"This AOI is large, so imagery is being loaded at {resolution}m/pixel "
+                    f"(native is {NATIVE_RESOLUTION}m) to keep memory use bounded."
+                )
             with st.spinner("Searching for recent Sentinel-2 scenes..."):
                 items = search_recent_scenes(aoi_gdf, n_scenes=n_scenes, max_cloud_cover=max_cloud_cover)
             st.write(
@@ -104,7 +132,7 @@ if aoi_gdf is not None and not aoi_gdf.empty:
                 + ", ".join(i.properties["datetime"][:10] for i in items)
             )
             with st.spinner("Loading bands and computing NDTI..."):
-                stack = load_ndti_stack(items, aoi_gdf)
+                stack = load_ndti_stack(items, aoi_gdf, resolution=resolution)
                 mean_ndti = average_ndti(stack)
 
             st.session_state["fetch_key"] = fetch_key
