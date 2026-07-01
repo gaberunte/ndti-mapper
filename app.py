@@ -16,6 +16,7 @@ from ndti import (
     classify_ndti,
     equal_interval_bins,
     load_ndti_stack,
+    quantile_bins,
     range_labels,
     search_recent_scenes,
 )
@@ -35,8 +36,19 @@ with st.sidebar:
     st.markdown("**NDTI classes**")
     binning_mode = st.radio(
         "Binning mode",
-        ["Auto (equal-interval over this scene's NDTI range)", "Custom breaks"],
+        [
+            "Equal-interval (equal NDTI range per class)",
+            "Quantile (equal pixel count per class)",
+            "Custom breaks",
+        ],
         index=0,
+        help=(
+            "Equal-interval splits the observed NDTI range into evenly sized steps — "
+            "intuitive, but a skewed distribution can leave some classes nearly empty. "
+            "Quantile instead puts an equal number of pixels in each class, guaranteeing "
+            "visual balance across the map; better for spotting relative differences "
+            "within one AOI, though class boundaries are less 'round'."
+        ),
     )
     if binning_mode == "Custom breaks":
         b1 = st.number_input("Bare / high disturbance <", value=0.15, step=0.01, format="%.2f")
@@ -100,6 +112,9 @@ if aoi_gdf is not None and not aoi_gdf.empty:
 
         if binning_mode == "Custom breaks":
             bins, labels = custom_bins, DEFAULT_LABELS
+        elif binning_mode.startswith("Quantile"):
+            bins = quantile_bins(mean_ndti, n_classes=4)
+            labels = range_labels(bins)
         else:
             bins = equal_interval_bins(mean_ndti, n_classes=4)
             labels = range_labels(bins)

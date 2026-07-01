@@ -85,6 +85,18 @@ def equal_interval_bins(ndti_mean: xr.DataArray, n_classes: int = 4) -> list[flo
     return np.linspace(vmin, vmax, n_classes + 1).tolist()
 
 
+def quantile_bins(ndti_mean: xr.DataArray, n_classes: int = 4) -> list[float]:
+    """Split this scene's NDTI values into n_classes bins holding an equal pixel count each."""
+    values = ndti_mean.values
+    percentiles = np.linspace(0, 100, n_classes + 1)
+    edges = np.nanpercentile(values, percentiles)
+    # Guard against duplicate edges when many pixels share a value (e.g. large flat areas)
+    edges = np.unique(edges)
+    if len(edges) < 2:
+        edges = np.array([float(np.nanmin(values)), float(np.nanmax(values))])
+    return edges.tolist()
+
+
 def range_labels(bins: list[float]) -> list[str]:
     """Generate 'low..high' legend labels from bin edges, e.g. for data-driven bins."""
     return [f"{bins[i]:.3f} – {bins[i + 1]:.3f}" for i in range(len(bins) - 1)]
