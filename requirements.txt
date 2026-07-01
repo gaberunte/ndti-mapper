@@ -1,0 +1,15 @@
+streamlit
+streamlit-folium
+folium
+geopandas
+shapely
+pystac-client
+planetary-computer
+odc-stac
+odc-geo
+rioxarray
+rasterio
+xarray
+numpy
+matplotlib
+matplotlib-scalebar
