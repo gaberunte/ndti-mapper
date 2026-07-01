@@ -13,6 +13,18 @@ from rasterio.io import MemoryFile
 from rasterio.shutil import copy as rio_copy
 
 CLASS_COLORS = ["#8c510a", "#d8b365", "#80cdc1", "#01665e"]  # bare -> high residue
+NODATA_BYTE = 255
+
+
+def _hex_to_rgb(hex_color: str) -> tuple[int, int, int]:
+    hex_color = hex_color.lstrip("#")
+    return tuple(int(hex_color[i : i + 2], 16) for i in (0, 2, 4))
+
+
+def _class_colormap(n: int) -> dict:
+    cmap = {i: (*_hex_to_rgb(CLASS_COLORS[i]), 255) for i in range(n)}
+    cmap[NODATA_BYTE] = (255, 255, 255, 0)  # transparent
+    return cmap
 
 
 def render_preview(classified, aoi_gdf, title="NDTI (scene average)"):
@@ -35,22 +47,8 @@ def render_preview(classified, aoi_gdf, title="NDTI (scene average)"):
 
 
 def export_geotiff(classified, out_path):
-    classified.rio.to_raster(out_path, dtype="float32")
-
-
-def export_geopdf(classified, out_dir) -> Path:
-    """Write the classified raster as a true georeferenced PDF via rasterio's bundled GDAL.
-
-    GDAL's PDF driver only supports CreateCopy (not Create), so we build an
-    in-memory GeoTIFF first and copy it into the PDF driver.
-    """
-    out_dir = Path(out_dir)
-    pdf_path = out_dir / "ndti_classified.pdf"
-
-    # PDF driver only supports 8-bit bands, so classes are cast to uint8
-    # with 255 reserved as the nodata sentinel for masked-out pixels.
-    nodata = 255
-    data = np.where(np.isnan(classified.values), nodata, classified.values).astype("uint8")
+    n = len(classified.attrs["labels"])
+    data = np.where(np.isnan(classified.values), NODATA_BYTE, classified.values).astype("uint8")
 
     profile = dict(
         driver="GTiff",
@@ -60,12 +58,42 @@ def export_geopdf(classified, out_dir) -> Path:
         dtype="uint8",
         crs=classified.rio.crs,
         transform=classified.rio.transform(),
-        nodata=nodata,
+        nodata=NODATA_BYTE,
+        photometric="PALETTE",
+    )
+    with rasterio.open(out_path, "w", **profile) as dst:
+        dst.write(data, 1)
+        dst.write_colormap(1, _class_colormap(n))
+
+
+def export_geopdf(classified, out_dir) -> Path:
+    """Write the classified raster as a true georeferenced, colored PDF via rasterio's bundled GDAL.
+
+    GDAL's PDF driver only supports CreateCopy (not Create) and 8-bit bands, so classes
+    are cast to a paletted uint8 GeoTIFF (with a color table matching the preview's
+    CLASS_COLORS) and copied into the PDF driver, which expands the palette to RGB.
+    """
+    out_dir = Path(out_dir)
+    pdf_path = out_dir / "ndti_classified.pdf"
+    n = len(classified.attrs["labels"])
+    data = np.where(np.isnan(classified.values), NODATA_BYTE, classified.values).astype("uint8")
+
+    profile = dict(
+        driver="GTiff",
+        height=data.shape[0],
+        width=data.shape[1],
+        count=1,
+        dtype="uint8",
+        crs=classified.rio.crs,
+        transform=classified.rio.transform(),
+        nodata=NODATA_BYTE,
+        photometric="PALETTE",
     )
 
     with MemoryFile() as memfile:
         with memfile.open(**profile) as mem:
             mem.write(data, 1)
+            mem.write_colormap(1, _class_colormap(n))
         rio_copy(memfile.name, str(pdf_path), driver="PDF", GEO_ENCODING="ISO32000")
 
     return pdf_path
