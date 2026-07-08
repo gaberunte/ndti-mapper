@@ -18,6 +18,7 @@ from ndti import (
     classify_ndti,
     equal_interval_bins,
     estimate_resolution,
+    load_grassland_mask,
     load_ndti_stack,
     quantile_bins,
     range_labels,
@@ -60,6 +61,17 @@ with st.sidebar:
             start_date, end_date = picked
         else:
             st.warning("Pick both a start and end date to search within that window.")
+
+    st.markdown("**Land cover**")
+    mask_grassland = st.checkbox(
+        "Mask to grasslands only",
+        value=False,
+        help=(
+            "Uses ESA WorldCover (10m, 2021) to exclude anything not classified as "
+            "grassland -- trees, shrubland, cropland, built-up, bare ground, water -- "
+            "before binning, so classes reflect grassland/rangeland pixels only."
+        ),
+    )
 
     st.markdown("**NDTI classes**")
     binning_mode = st.radio(
@@ -201,38 +213,62 @@ if aoi_gdf is not None and not aoi_gdf.empty:
             st.session_state["fetch_key"] = fetch_key
             st.session_state["mean_ndti"] = mean_ndti
 
-        if binning_mode == "Custom breaks":
-            bins, labels = custom_bins, DEFAULT_LABELS
-        elif binning_mode.startswith("Quantile"):
-            bins = quantile_bins(mean_ndti, n_classes=n_classes)
-            labels = range_labels(bins)
+        title = "NDTI (scene average)"
+        if mask_grassland:
+            # Cached separately (keyed on AOI + resolution only) since it doesn't
+            # depend on scene count/cloud cover/date range, and fetching it is its
+            # own network call -- no reason to redo it just because e.g. n_scenes changed.
+            mask_key = (aoi_gdf.geometry.union_all().wkb, resolution)
+            if st.session_state.get("mask_key") == mask_key:
+                grassland_mask = st.session_state["grassland_mask"]
+            else:
+                with st.spinner("Loading ESA WorldCover land cover..."):
+                    grassland_mask = load_grassland_mask(aoi_gdf, mean_ndti)
+                st.session_state["mask_key"] = mask_key
+                st.session_state["grassland_mask"] = grassland_mask
+            mean_ndti = mean_ndti.where(grassland_mask)
+            title += " — grassland only"
+
+        if int(mean_ndti.notnull().sum()) == 0:
+            st.warning(
+                "No valid pixels left after masking to grassland (per ESA WorldCover) — "
+                "this AOI may be entirely non-grassland, or entirely cloud-covered. "
+                "Try unchecking \"Mask to grasslands only\" or a different date range."
+            )
         else:
-            bins = equal_interval_bins(mean_ndti, n_classes=n_classes)
-            labels = range_labels(bins)
+            if binning_mode == "Custom breaks":
+                bins, labels = custom_bins, DEFAULT_LABELS
+            elif binning_mode.startswith("Quantile"):
+                bins = quantile_bins(mean_ndti, n_classes=n_classes)
+                labels = range_labels(bins)
+            else:
+                bins = equal_interval_bins(mean_ndti, n_classes=n_classes)
+                labels = range_labels(bins)
 
-        classified = classify_ndti(mean_ndti, bins=bins, labels=labels)
+            classified = classify_ndti(mean_ndti, bins=bins, labels=labels)
 
-        with st.spinner("Building georeferenced PDF..."):
-            out_dir = tempfile.mkdtemp()
-            pdf_path = export_geopdf(classified, out_dir)
-            pdf_bytes = pdf_path.read_bytes()
+            with st.spinner("Building georeferenced PDF..."):
+                out_dir = tempfile.mkdtemp()
+                pdf_path = export_geopdf(classified, out_dir, title=title)
+                pdf_bytes = pdf_path.read_bytes()
 
-        # Stashed in session_state (rather than just rendered here) because Streamlit
-        # reruns the whole script on any widget interaction -- e.g. redrawing the AOI
-        # map -- and st.button() only reads True on the one rerun right after the
-        # click. Rendering straight from this block would make the result vanish on
-        # the very next unrelated interaction.
-        st.session_state["result"] = {
-            "classified": classified,
-            "aoi_gdf": aoi_gdf,
-            "pdf_bytes": pdf_bytes,
-        }
+            # Stashed in session_state (rather than just rendered here) because Streamlit
+            # reruns the whole script on any widget interaction -- e.g. redrawing the AOI
+            # map -- and st.button() only reads True on the one rerun right after the
+            # click. Rendering straight from this block would make the result vanish on
+            # the very next unrelated interaction.
+            st.session_state["result"] = {
+                "classified": classified,
+                "aoi_gdf": aoi_gdf,
+                "pdf_bytes": pdf_bytes,
+                "title": title,
+            }
 
     result = st.session_state.get("result")
     if result is not None:
         if result["aoi_gdf"].geometry.union_all().wkb != aoi_gdf.geometry.union_all().wkb:
             st.caption("Showing results from a previous AOI/run — click \"Run NDTI analysis\" to update.")
-        fig = render_preview(result["classified"], result["aoi_gdf"])
+        fig = render_preview(result["classified"], result["aoi_gdf"], title=result["title"])
         st.pyplot(fig)
         st.download_button(
             "Download georeferenced PDF", result["pdf_bytes"], file_name="ndti_map.pdf", mime="application/pdf"

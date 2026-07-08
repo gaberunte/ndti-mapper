@@ -8,9 +8,14 @@ import pystac_client
 import rioxarray  # noqa: F401  (registers the .rio accessor)
 import xarray as xr
 from odc.stac import load as odc_load
+from rasterio.enums import Resampling
 
 STAC_URL = "https://planetarycomputer.microsoft.com/api/stac/v1"
 COLLECTION = "sentinel-2-l2a"
+
+WORLDCOVER_COLLECTION = "esa-worldcover"
+WORLDCOVER_VERSION = "2.0.0"  # 2021 epoch; avoids mixing with the older 2020 v1.0.0 product
+WORLDCOVER_GRASSLAND_CODE = 30
 
 NATIVE_RESOLUTION = 20  # meters; native resolution of the SWIR bands used for NDTI
 # Keeps peak memory in the few-hundred-MB range: a ~56 km^2 real ranch AOI at native
@@ -106,6 +111,33 @@ def load_ndti_stack(items, aoi_gdf: gpd.GeoDataFrame, resolution: int = 20) -> x
     aoi_native = aoi_gdf.to_crs(ndti.rio.crs)
     ndti_clipped = ndti.rio.clip(aoi_native.geometry.values, aoi_native.crs, drop=True)
     return ndti_clipped  # dims: time, y, x
+
+
+def load_grassland_mask(aoi_gdf: gpd.GeoDataFrame, match: xr.DataArray) -> xr.DataArray:
+    """Load ESA WorldCover for the AOI and return a boolean mask (True = grassland),
+    resampled onto `match`'s exact grid (nearest-neighbor, since land cover is categorical)."""
+    aoi_wgs84 = aoi_gdf.to_crs(4326)
+    bbox = tuple(aoi_wgs84.total_bounds)
+
+    catalog = pystac_client.Client.open(STAC_URL, modifier=planetary_computer.sign_inplace)
+    search = catalog.search(
+        collections=[WORLDCOVER_COLLECTION],
+        bbox=bbox,
+        query={"esa_worldcover:product_version": {"eq": WORLDCOVER_VERSION}},
+    )
+    items = list(search.items())
+    if not items:
+        raise ValueError("No ESA WorldCover coverage found for this area.")
+
+    ds = odc_load(items, bands=["map"], bbox=bbox, chunks={})
+    landcover = ds["map"]
+    if "time" in landcover.dims:
+        # Adjacent WorldCover tiles are separate time steps; they don't spatially
+        # overlap, and 0 (nodata) sorts below every real class code (10-100).
+        landcover = landcover.max(dim="time")
+
+    landcover_matched = landcover.rio.reproject_match(match, resampling=Resampling.nearest)
+    return landcover_matched == WORLDCOVER_GRASSLAND_CODE
 
 
 def average_ndti(ndti_stack: xr.DataArray) -> xr.DataArray:
