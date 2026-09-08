@@ -10,7 +10,7 @@ import streamlit as st
 from folium.plugins import Draw
 from streamlit_folium import st_folium
 
-from mapping import export_geopdf, render_preview
+from mapping import export_geopdf, export_geotiff, export_ndti_geotiff, render_preview
 from ndti import (
     DEFAULT_LABELS,
     NATIVE_RESOLUTION,
@@ -247,10 +247,12 @@ if aoi_gdf is not None and not aoi_gdf.empty:
 
             classified = classify_ndti(mean_ndti, bins=bins, labels=labels)
 
-            with st.spinner("Building georeferenced PDF..."):
+            with st.spinner("Building georeferenced PDF and GeoTIFFs..."):
                 out_dir = tempfile.mkdtemp()
                 pdf_path = export_geopdf(classified, out_dir, title=title)
                 pdf_bytes = pdf_path.read_bytes()
+                classified_tif_bytes = export_geotiff(classified, out_dir).read_bytes()
+                ndti_tif_bytes = export_ndti_geotiff(mean_ndti, out_dir).read_bytes()
 
             # Stashed in session_state (rather than just rendered here) because Streamlit
             # reruns the whole script on any widget interaction -- e.g. redrawing the AOI
@@ -261,6 +263,8 @@ if aoi_gdf is not None and not aoi_gdf.empty:
                 "classified": classified,
                 "aoi_gdf": aoi_gdf,
                 "pdf_bytes": pdf_bytes,
+                "classified_tif_bytes": classified_tif_bytes,
+                "ndti_tif_bytes": ndti_tif_bytes,
                 "title": title,
             }
 
@@ -270,8 +274,29 @@ if aoi_gdf is not None and not aoi_gdf.empty:
             st.caption("Showing results from a previous AOI/run — click \"Run NDTI analysis\" to update.")
         fig = render_preview(result["classified"], result["aoi_gdf"], title=result["title"])
         st.pyplot(fig)
-        st.download_button(
-            "Download georeferenced PDF", result["pdf_bytes"], file_name="ndti_map.pdf", mime="application/pdf"
-        )
+        col_pdf, col_tif, col_ndti = st.columns(3)
+        with col_pdf:
+            st.download_button(
+                "Download georeferenced PDF",
+                result["pdf_bytes"],
+                file_name="ndti_map.pdf",
+                mime="application/pdf",
+            )
+        with col_tif:
+            st.download_button(
+                "Download classified GeoTIFF",
+                result["classified_tif_bytes"],
+                file_name="ndti_classified.tif",
+                mime="image/tiff",
+                help="Single-band palette raster; pixel values are the class index, with an embedded colormap.",
+            )
+        with col_ndti:
+            st.download_button(
+                "Download continuous NDTI GeoTIFF",
+                result["ndti_tif_bytes"],
+                file_name="ndti_continuous.tif",
+                mime="image/tiff",
+                help="Float32 raster of the raw averaged NDTI values (unbinned), for analysis in GIS.",
+            )
 elif upload is None:
     st.info("Draw a polygon on the map above, or upload a file, then click \"Run NDTI analysis\".")

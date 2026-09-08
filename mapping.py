@@ -92,7 +92,14 @@ def _classified_to_rgb(classified):
     return rgb
 
 
-def export_geotiff(classified, out_path):
+def export_geotiff(classified, out_dir) -> Path:
+    """Write the classified raster as a single-band, palette-colored GeoTIFF.
+
+    Pixel values are the class index (0..n-1); a colormap matching the preview/PDF is
+    embedded, and pixels outside the AOI (or cloud-masked) carry the nodata value.
+    """
+    out_dir = Path(out_dir)
+    tif_path = out_dir / "ndti_classified.tif"
     n = len(classified.attrs["labels"])
     data = np.where(np.isnan(classified.values), NODATA_BYTE, classified.values).astype("uint8")
 
@@ -106,10 +113,39 @@ def export_geotiff(classified, out_path):
         transform=classified.rio.transform(),
         nodata=NODATA_BYTE,
         photometric="PALETTE",
+        compress="deflate",
     )
-    with rasterio.open(out_path, "w", **profile) as dst:
+    with rasterio.open(tif_path, "w", **profile) as dst:
         dst.write(data, 1)
         dst.write_colormap(1, _class_colormap(n))
+    return tif_path
+
+
+def export_ndti_geotiff(ndti_mean, out_dir) -> Path:
+    """Write the continuous averaged NDTI as a single-band float32 GeoTIFF (nan = nodata).
+
+    This is the raw data product -- unbinned NDTI values -- for further analysis in GIS,
+    as opposed to the classified/palette raster from ``export_geotiff``.
+    """
+    out_dir = Path(out_dir)
+    tif_path = out_dir / "ndti_continuous.tif"
+    data = ndti_mean.values.astype("float32")
+
+    profile = dict(
+        driver="GTiff",
+        height=data.shape[0],
+        width=data.shape[1],
+        count=1,
+        dtype="float32",
+        crs=ndti_mean.rio.crs,
+        transform=ndti_mean.rio.transform(),
+        nodata=float("nan"),
+        compress="deflate",
+    )
+    with rasterio.open(tif_path, "w", **profile) as dst:
+        dst.write(data, 1)
+        dst.set_band_description(1, "NDTI (scene average)")
+    return tif_path
 
 
 def export_geopdf(classified, out_dir, title="NDTI (scene average)") -> Path:
