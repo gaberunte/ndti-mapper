@@ -144,7 +144,7 @@ def export_ndti_geotiff(ndti_mean, out_dir) -> Path:
     )
     with rasterio.open(tif_path, "w", **profile) as dst:
         dst.write(data, 1)
-        dst.set_band_description(1, "NDTI (scene average)")
+        dst.set_band_description(1, "NDTI (scene composite)")
     return tif_path
 
 

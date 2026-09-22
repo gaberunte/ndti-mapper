@@ -140,11 +140,14 @@ def load_grassland_mask(aoi_gdf: gpd.GeoDataFrame, match: xr.DataArray) -> xr.Da
     return landcover_matched == WORLDCOVER_GRASSLAND_CODE
 
 
-def average_ndti(ndti_stack: xr.DataArray) -> xr.DataArray:
-    """Average NDTI across scenes, ignoring cloud-masked pixels."""
-    mean = ndti_stack.mean(dim="time", skipna=True)
-    mean = mean.rio.write_crs(ndti_stack.rio.crs)
-    return mean
+def composite_ndti(ndti_stack: xr.DataArray, method: str = "mean") -> xr.DataArray:
+    """Composite NDTI across scenes (mean or median), ignoring cloud-masked pixels."""
+    if method == "median":
+        composite = ndti_stack.median(dim="time", skipna=True)
+    else:
+        composite = ndti_stack.mean(dim="time", skipna=True)
+    composite = composite.rio.write_crs(ndti_stack.rio.crs)
+    return composite
 
 
 def equal_interval_bins(ndti_mean: xr.DataArray, n_classes: int = 4) -> list[float]:

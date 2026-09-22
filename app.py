@@ -14,8 +14,8 @@ from mapping import export_geopdf, export_geotiff, export_ndti_geotiff, render_p
 from ndti import (
     DEFAULT_LABELS,
     NATIVE_RESOLUTION,
-    average_ndti,
     classify_ndti,
+    composite_ndti,
     equal_interval_bins,
     estimate_resolution,
     load_grassland_mask,
@@ -35,7 +35,20 @@ st.caption(
 with st.sidebar:
     st.header("Settings")
     max_cloud_cover = st.slider("Max scene cloud cover (%)", 0, 100, 40)
-    n_scenes = st.number_input("Number of recent scenes to average", 1, 10, 3)
+    n_scenes = st.number_input("Number of recent scenes to combine", 1, 10, 3)
+
+    composite_mode = st.radio(
+        "Compositing method",
+        ["Mean (default)", "Median"],
+        index=0,
+        help=(
+            "How per-scene NDTI values are combined into one value per pixel. Mean is "
+            "the simple average; median is more robust to outlier scenes (e.g. a scene "
+            "with undetected cloud/shadow contamination) but needs more scenes to be "
+            "meaningfully different from the mean."
+        ),
+    )
+    composite_method = "median" if composite_mode == "Median" else "mean"
 
     st.markdown("**Imagery date range**")
     date_mode = st.radio(
@@ -180,6 +193,7 @@ if aoi_gdf is not None and not aoi_gdf.empty:
         resolution,
         start_date,
         end_date,
+        composite_method,
     )
 
     date_range_ready = date_mode == "Recent (default)" or (start_date and end_date)
@@ -187,7 +201,7 @@ if aoi_gdf is not None and not aoi_gdf.empty:
     if st.button("2. Run NDTI analysis", type="primary", disabled=not date_range_ready):
         if st.session_state.get("fetch_key") == fetch_key:
             st.info("Reusing already-fetched imagery for this AOI/settings — only re-binning.")
-            mean_ndti = st.session_state["mean_ndti"]
+            ndti_composite = st.session_state["ndti_composite"]
         else:
             if resolution > NATIVE_RESOLUTION:
                 st.info(
@@ -208,12 +222,12 @@ if aoi_gdf is not None and not aoi_gdf.empty:
             )
             with st.spinner("Loading bands and computing NDTI..."):
                 stack = load_ndti_stack(items, aoi_gdf, resolution=resolution)
-                mean_ndti = average_ndti(stack)
+                ndti_composite = composite_ndti(stack, method=composite_method)
 
             st.session_state["fetch_key"] = fetch_key
-            st.session_state["mean_ndti"] = mean_ndti
+            st.session_state["ndti_composite"] = ndti_composite
 
-        title = "NDTI (scene average)"
+        title = f"NDTI (scene {composite_method})"
         if mask_grassland:
             # Cached separately (keyed on AOI + resolution only) since it doesn't
             # depend on scene count/cloud cover/date range, and fetching it is its
@@ -223,13 +237,13 @@ if aoi_gdf is not None and not aoi_gdf.empty:
                 grassland_mask = st.session_state["grassland_mask"]
             else:
                 with st.spinner("Loading ESA WorldCover land cover..."):
-                    grassland_mask = load_grassland_mask(aoi_gdf, mean_ndti)
+                    grassland_mask = load_grassland_mask(aoi_gdf, ndti_composite)
                 st.session_state["mask_key"] = mask_key
                 st.session_state["grassland_mask"] = grassland_mask
-            mean_ndti = mean_ndti.where(grassland_mask)
+            ndti_composite = ndti_composite.where(grassland_mask)
             title += " — grassland only"
 
-        if int(mean_ndti.notnull().sum()) == 0:
+        if int(ndti_composite.notnull().sum()) == 0:
             st.warning(
                 "No valid pixels left after masking to grassland (per ESA WorldCover) — "
                 "this AOI may be entirely non-grassland, or entirely cloud-covered. "
@@ -239,20 +253,20 @@ if aoi_gdf is not None and not aoi_gdf.empty:
             if binning_mode == "Custom breaks":
                 bins, labels = custom_bins, DEFAULT_LABELS
             elif binning_mode.startswith("Quantile"):
-                bins = quantile_bins(mean_ndti, n_classes=n_classes)
+                bins = quantile_bins(ndti_composite, n_classes=n_classes)
                 labels = range_labels(bins)
             else:
-                bins = equal_interval_bins(mean_ndti, n_classes=n_classes)
+                bins = equal_interval_bins(ndti_composite, n_classes=n_classes)
                 labels = range_labels(bins)
 
-            classified = classify_ndti(mean_ndti, bins=bins, labels=labels)
+            classified = classify_ndti(ndti_composite, bins=bins, labels=labels)
 
             with st.spinner("Building georeferenced PDF and GeoTIFFs..."):
                 out_dir = tempfile.mkdtemp()
                 pdf_path = export_geopdf(classified, out_dir, title=title)
                 pdf_bytes = pdf_path.read_bytes()
                 classified_tif_bytes = export_geotiff(classified, out_dir).read_bytes()
-                ndti_tif_bytes = export_ndti_geotiff(mean_ndti, out_dir).read_bytes()
+                ndti_tif_bytes = export_ndti_geotiff(ndti_composite, out_dir).read_bytes()
 
             # Stashed in session_state (rather than just rendered here) because Streamlit
             # reruns the whole script on any widget interaction -- e.g. redrawing the AOI
