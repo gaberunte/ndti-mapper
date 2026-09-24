@@ -1,6 +1,7 @@
 """Rendering: classified raster -> preview figure + true georeferenced PDF export."""
 from __future__ import annotations
 
+import textwrap
 from pathlib import Path
 
 import matplotlib.patches as mpatches
@@ -22,6 +23,7 @@ NODATA_BYTE = 255
 # under the land-cover mask, etc.) -- distinct from the plain white/transparent background
 # outside the AOI, so "no data here" doesn't read the same as "not part of the property."
 _MASKED_COLOR = (204, 204, 204)  # matplotlib "0.8" gray, matched in the raster export
+_MIN_LEGEND_PX = 900  # floor for laying out the legend panel's text, see _legend_panel_rgb
 
 
 def _class_colors(n: int) -> list[str]:
@@ -67,21 +69,41 @@ def render_preview(classified, aoi_gdf, title="NDTI (scene average)"):
     return fig
 
 
-def _legend_panel_rgb(labels, title, height_px, width_px=220, dpi=150):
-    """Render a title + color-swatch legend as an RGB array, resized to exactly height_px tall."""
+def _legend_panel_rgb(labels, title, height_px, metadata_lines=None, width_px=220, dpi=150):
+    """Render a title + metadata + color-swatch legend as an RGB array, resized to exactly height_px tall.
+
+    Text is laid out on a canvas at least `_MIN_LEGEND_PX` tall, then scaled to fit
+    `height_px` -- a raster with few rows (small AOI, coarse resolution) would otherwise
+    give fixed-size fonts too little room, clipping the legend off the bottom.
+    """
     n = len(labels)
     colors = _class_colors(n)
-    fig = plt.figure(figsize=(width_px / dpi, height_px / dpi), dpi=dpi)
+    render_px = max(height_px, _MIN_LEGEND_PX)
+    fig = plt.figure(figsize=(width_px / dpi, render_px / dpi), dpi=dpi)
     fig.patch.set_facecolor("white")
     ax = fig.add_axes((0, 0, 1, 1))
     ax.set_xlim(0, 1)
     ax.set_ylim(0, 1)
     ax.axis("off")
-    ax.text(0.08, 0.95, title, fontsize=10, fontweight="bold", va="top", wrap=True)
+
+    # Line heights are computed as an axis-coordinate fraction (rather than a fixed
+    # constant) so stacked text blocks don't collide regardless of the render height.
+    def line_frac(fontsize, leading=1.35):
+        return fontsize * dpi / 72 * leading / render_px
+
+    y = 0.95
+    title_lines = textwrap.wrap(title, width=24) or [title]
+    ax.text(0.08, y, "\n".join(title_lines), fontsize=10, fontweight="bold", va="top")
+    y -= line_frac(10) * len(title_lines) + line_frac(10) * 0.6
+
+    if metadata_lines:
+        wrapped = [line for raw in metadata_lines for line in (textwrap.wrap(raw, width=32) or [""])]
+        ax.text(0.08, y, "\n".join(wrapped), fontsize=6, va="top", color="0.25", linespacing=1.6)
+        y -= line_frac(6, leading=1.6) * len(wrapped) + line_frac(6) * 1.2
 
     handles = [mpatches.Patch(color=colors[i], label=labels[i]) for i in range(n)]
     handles.append(mpatches.Patch(color=to_hex([c / 255 for c in _MASKED_COLOR]), label="No data (cloud/mask)"))
-    ax.legend(handles=handles, loc="center left", bbox_to_anchor=(0.0, 0.55), frameon=False, fontsize=7.5)
+    ax.legend(handles=handles, loc="upper left", bbox_to_anchor=(0.0, max(0.03, y)), frameon=False, fontsize=7.5)
 
     fig.canvas.draw()
     panel = np.asarray(fig.canvas.buffer_rgba())[:, :, :3]
@@ -202,7 +224,7 @@ def export_ndti_geotiff(ndti_mean, out_dir) -> Path:
     return tif_path
 
 
-def export_geopdf(classified, aoi_gdf, out_dir, title="NDTI (scene average)") -> Path:
+def export_geopdf(classified, aoi_gdf, out_dir, title="NDTI (scene average)", metadata_lines=None) -> Path:
     """Write the classified raster + legend as a true georeferenced, colored PDF via rasterio's bundled GDAL.
 
     GDAL's PDF driver only supports CreateCopy (not Create), so an in-memory GeoTIFF is
@@ -212,6 +234,8 @@ def export_geopdf(classified, aoi_gdf, out_dir, title="NDTI (scene average)") ->
     meaningless coordinates past the map's real extent, which is harmless for a report).
     The AOI boundary is burned directly into the map pixels (there's no vector overlay
     in a flat raster PDF), so the property line stays visible in the exported map.
+    `metadata_lines`, if given, is printed under the title (e.g. scene dates used, cloud
+    cover threshold, resolution) so that context isn't lost once the PDF leaves the app.
     """
     out_dir = Path(out_dir)
     pdf_path = out_dir / "ndti_classified.pdf"
@@ -220,7 +244,7 @@ def export_geopdf(classified, aoi_gdf, out_dir, title="NDTI (scene average)") ->
     aoi_mask = _aoi_mask(aoi_gdf, classified.rio.crs, classified.rio.transform(), classified.shape)
     map_rgb = _classified_to_rgb(classified, aoi_mask=aoi_mask)
     map_rgb = _draw_boundary(map_rgb, aoi_gdf, classified.rio.crs, classified.rio.transform())
-    legend_rgb = _legend_panel_rgb(labels, title, height_px=map_rgb.shape[0])
+    legend_rgb = _legend_panel_rgb(labels, title, height_px=map_rgb.shape[0], metadata_lines=metadata_lines)
     combined = np.hstack([map_rgb, legend_rgb])  # (rows, map_cols + legend_cols, 3)
 
     profile = dict(

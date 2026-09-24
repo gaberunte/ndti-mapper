@@ -202,6 +202,7 @@ if aoi_gdf is not None and not aoi_gdf.empty:
         if st.session_state.get("fetch_key") == fetch_key:
             st.info("Reusing already-fetched imagery for this AOI/settings — only re-binning.")
             ndti_composite = st.session_state["ndti_composite"]
+            scene_dates = st.session_state["scene_dates"]
         else:
             if resolution > NATIVE_RESOLUTION:
                 st.info(
@@ -216,16 +217,15 @@ if aoi_gdf is not None and not aoi_gdf.empty:
                     start_date=start_date,
                     end_date=end_date,
                 )
-            st.write(
-                f"Using {len(items)} scene(s): "
-                + ", ".join(i.properties["datetime"][:10] for i in items)
-            )
+            scene_dates = [i.properties["datetime"][:10] for i in items]
+            st.write(f"Using {len(items)} scene(s): " + ", ".join(scene_dates))
             with st.spinner("Loading bands and computing NDTI..."):
                 stack = load_ndti_stack(items, aoi_gdf, resolution=resolution)
                 ndti_composite = composite_ndti(stack, method=composite_method)
 
             st.session_state["fetch_key"] = fetch_key
             st.session_state["ndti_composite"] = ndti_composite
+            st.session_state["scene_dates"] = scene_dates
 
         title = f"NDTI (scene {composite_method})"
         if mask_grassland:
@@ -261,9 +261,17 @@ if aoi_gdf is not None and not aoi_gdf.empty:
 
             classified = classify_ndti(ndti_composite, bins=bins, labels=labels)
 
+            metadata_lines = [
+                f"Scenes ({len(scene_dates)}): " + ", ".join(scene_dates),
+                f"{composite_method.title()} composite · ≤{max_cloud_cover}% cloud cover "
+                f"· {resolution}m/pixel",
+            ]
+            if mask_grassland:
+                metadata_lines.append("Masked to grassland (ESA WorldCover)")
+
             with st.spinner("Building georeferenced PDF and GeoTIFFs..."):
                 out_dir = tempfile.mkdtemp()
-                pdf_path = export_geopdf(classified, aoi_gdf, out_dir, title=title)
+                pdf_path = export_geopdf(classified, aoi_gdf, out_dir, title=title, metadata_lines=metadata_lines)
                 pdf_bytes = pdf_path.read_bytes()
                 classified_tif_bytes = export_geotiff(classified, out_dir).read_bytes()
                 ndti_tif_bytes = export_ndti_geotiff(ndti_composite, out_dir).read_bytes()
