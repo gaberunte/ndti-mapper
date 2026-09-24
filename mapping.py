@@ -18,6 +18,10 @@ from rasterio.shutil import copy as rio_copy
 # fixed 4-color palette but sampled to fit however many classes are actually in use.
 _BASE_CMAP = "BrBG"
 NODATA_BYTE = 255
+# Fill for pixels inside the AOI that have no valid class (cloud-masked, non-grassland
+# under the land-cover mask, etc.) -- distinct from the plain white/transparent background
+# outside the AOI, so "no data here" doesn't read the same as "not part of the property."
+_MASKED_COLOR = (204, 204, 204)  # matplotlib "0.8" gray, matched in the raster export
 
 
 def _class_colors(n: int) -> list[str]:
@@ -44,11 +48,17 @@ def render_preview(classified, aoi_gdf, title="NDTI (scene average)"):
     cmap = ListedColormap(colors)
     norm = BoundaryNorm(np.arange(-0.5, n + 0.5, 1), cmap.N)
 
+    aoi_proj = aoi_gdf.to_crs(classified.rio.crs)
+
     fig, ax = plt.subplots(figsize=(8, 8))
-    classified.plot.imshow(ax=ax, cmap=cmap, norm=norm, add_colorbar=False)
-    aoi_gdf.to_crs(classified.rio.crs).boundary.plot(ax=ax, edgecolor="black", linewidth=1.2)
+    # Gray AOI fill underneath: the raster's NaN pixels render transparent, so this
+    # shows through for masked-out pixels (cloud, non-grassland, ...) inside the AOI.
+    aoi_proj.plot(ax=ax, facecolor="0.8", edgecolor="none", zorder=0)
+    classified.plot.imshow(ax=ax, cmap=cmap, norm=norm, add_colorbar=False, zorder=1)
+    aoi_proj.boundary.plot(ax=ax, edgecolor="black", linewidth=1.2, zorder=2)
 
     handles = [mpatches.Patch(color=colors[i], label=labels[i]) for i in range(n)]
+    handles.append(mpatches.Patch(color="0.8", label="No data (cloud/mask)"))
     ax.legend(handles=handles, loc="lower left", fontsize=8, framealpha=0.9)
     ax.set_title(title)
     ax.set_axis_off()
@@ -70,6 +80,7 @@ def _legend_panel_rgb(labels, title, height_px, width_px=220, dpi=150):
     ax.text(0.08, 0.95, title, fontsize=10, fontweight="bold", va="top", wrap=True)
 
     handles = [mpatches.Patch(color=colors[i], label=labels[i]) for i in range(n)]
+    handles.append(mpatches.Patch(color=to_hex([c / 255 for c in _MASKED_COLOR]), label="No data (cloud/mask)"))
     ax.legend(handles=handles, loc="center left", bbox_to_anchor=(0.0, 0.55), frameon=False, fontsize=7.5)
 
     fig.canvas.draw()
@@ -81,16 +92,36 @@ def _legend_panel_rgb(labels, title, height_px, width_px=220, dpi=150):
     return panel
 
 
-def _classified_to_rgb(classified):
-    """Render the classified raster as an RGB array (white background outside the AOI)."""
+def _classified_to_rgb(classified, aoi_mask=None):
+    """Render the classified raster as an RGB array: white outside the AOI, gray for
+    masked-out pixels (cloud, non-grassland, ...) within the AOI if `aoi_mask` is given."""
     labels = classified.attrs["labels"]
     n = len(labels)
     colors = _class_colors(n)
     data = classified.values
     rgb = np.full((*data.shape, 3), 255, dtype="uint8")
+    if aoi_mask is not None:
+        rgb[np.isnan(data) & aoi_mask] = _MASKED_COLOR
     for i in range(n):
         rgb[data == i] = _hex_to_rgb(colors[i])
     return rgb
+
+
+def _aoi_mask(aoi_gdf, crs, transform, shape):
+    """Boolean raster mask, True where inside the AOI polygon(s) (fill, not just boundary)."""
+    aoi_proj = aoi_gdf.to_crs(crs)
+    shapes = [geom for geom in aoi_proj.geometry if geom is not None and not geom.is_empty]
+    if not shapes:
+        return np.zeros(shape, dtype=bool)
+
+    mask = rasterize(
+        [(geom, 1) for geom in shapes],
+        out_shape=shape,
+        transform=transform,
+        fill=0,
+        dtype="uint8",
+    )
+    return mask.astype(bool)
 
 
 def _draw_boundary(rgb, aoi_gdf, crs, transform, color=(0, 0, 0), width_px=2):
@@ -186,7 +217,8 @@ def export_geopdf(classified, aoi_gdf, out_dir, title="NDTI (scene average)") ->
     pdf_path = out_dir / "ndti_classified.pdf"
     labels = classified.attrs["labels"]
 
-    map_rgb = _classified_to_rgb(classified)
+    aoi_mask = _aoi_mask(aoi_gdf, classified.rio.crs, classified.rio.transform(), classified.shape)
+    map_rgb = _classified_to_rgb(classified, aoi_mask=aoi_mask)
     map_rgb = _draw_boundary(map_rgb, aoi_gdf, classified.rio.crs, classified.rio.transform())
     legend_rgb = _legend_panel_rgb(labels, title, height_px=map_rgb.shape[0])
     combined = np.hstack([map_rgb, legend_rgb])  # (rows, map_cols + legend_cols, 3)
