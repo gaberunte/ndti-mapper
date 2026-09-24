@@ -1,7 +1,6 @@
 """Rendering: classified raster -> preview figure + true georeferenced PDF export."""
 from __future__ import annotations
 
-import textwrap
 from pathlib import Path
 
 import matplotlib.patches as mpatches
@@ -72,6 +71,31 @@ def render_preview(classified, aoi_gdf, title="NDTI (scene average)"):
     return fig
 
 
+def _wrap_to_width(fig, text, fontsize, max_width_px, **text_kwargs):
+    """Word-wrap `text` to fit `max_width_px`, measured with the actual font metrics.
+
+    A fixed character count doesn't track physical width (bold/varying-width glyphs,
+    different font sizes), which was letting titles/metadata overflow the legend panel
+    and get clipped at its edge. This measures each trial line with the real renderer.
+    """
+    renderer = fig.canvas.get_renderer()
+    lines = []
+    current = ""
+    for word in text.split():
+        trial = f"{current} {word}".strip()
+        probe = fig.text(0, 0, trial, fontsize=fontsize, **text_kwargs)
+        width = probe.get_window_extent(renderer=renderer).width
+        probe.remove()
+        if current and width > max_width_px:
+            lines.append(current)
+            current = word
+        else:
+            current = trial
+    if current:
+        lines.append(current)
+    return lines or [text]
+
+
 def _legend_panel_rgb(labels, title, height_px, metadata_lines=None, width_px=220, dpi=150):
     """Render a title + metadata + color-swatch legend as an RGB array, resized to exactly height_px tall.
 
@@ -89,19 +113,26 @@ def _legend_panel_rgb(labels, title, height_px, metadata_lines=None, width_px=22
     ax.set_ylim(0, 1)
     ax.axis("off")
 
+    left_margin = 0.08
+    max_text_width_px = width_px * (1 - left_margin - 0.05)
+
     # Line heights are computed as an axis-coordinate fraction (rather than a fixed
     # constant) so stacked text blocks don't collide regardless of the render height.
     def line_frac(fontsize, leading=1.35):
         return fontsize * dpi / 72 * leading / render_px
 
     y = 0.95
-    title_lines = textwrap.wrap(title, width=24) or [title]
-    ax.text(0.08, y, "\n".join(title_lines), fontsize=10, fontweight="bold", va="top")
+    title_lines = _wrap_to_width(fig, title, 10, max_text_width_px, fontweight="bold")
+    ax.text(left_margin, y, "\n".join(title_lines), fontsize=10, fontweight="bold", va="top")
     y -= line_frac(10) * len(title_lines) + line_frac(10) * 0.6
 
     if metadata_lines:
-        wrapped = [line for raw in metadata_lines for line in (textwrap.wrap(raw, width=32) or [""])]
-        ax.text(0.08, y, "\n".join(wrapped), fontsize=6, va="top", color="0.25", linespacing=1.6)
+        wrapped = [
+            line
+            for raw in metadata_lines
+            for line in _wrap_to_width(fig, raw, 6, max_text_width_px, color="0.25")
+        ]
+        ax.text(left_margin, y, "\n".join(wrapped), fontsize=6, va="top", color="0.25", linespacing=1.6)
         y -= line_frac(6, leading=1.6) * len(wrapped) + line_frac(6) * 1.2
 
     handles = [mpatches.Patch(color=colors[i], label=labels[i]) for i in range(n)]
