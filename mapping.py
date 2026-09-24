@@ -10,6 +10,7 @@ import rasterio
 from matplotlib.colors import BoundaryNorm, ListedColormap, to_hex
 from matplotlib_scalebar.scalebar import ScaleBar
 from PIL import Image
+from rasterio.features import rasterize
 from rasterio.io import MemoryFile
 from rasterio.shutil import copy as rio_copy
 
@@ -92,6 +93,28 @@ def _classified_to_rgb(classified):
     return rgb
 
 
+def _draw_boundary(rgb, aoi_gdf, crs, transform, color=(0, 0, 0), width_px=2):
+    """Burn the AOI boundary as a solid outline directly into an RGB raster array,
+    so it survives export to a plain georeferenced raster/PDF (no matplotlib overlay)."""
+    aoi_proj = aoi_gdf.to_crs(crs)
+    px_size = abs(transform.a)
+    outline = aoi_proj.boundary.buffer(px_size * width_px / 2)
+    shapes = [geom for geom in outline if geom is not None and not geom.is_empty]
+    if not shapes:
+        return rgb
+
+    mask = rasterize(
+        [(geom, 1) for geom in shapes],
+        out_shape=rgb.shape[:2],
+        transform=transform,
+        fill=0,
+        dtype="uint8",
+    )
+    rgb = rgb.copy()
+    rgb[mask == 1] = color
+    return rgb
+
+
 def export_geotiff(classified, out_dir) -> Path:
     """Write the classified raster as a single-band, palette-colored GeoTIFF.
 
@@ -148,7 +171,7 @@ def export_ndti_geotiff(ndti_mean, out_dir) -> Path:
     return tif_path
 
 
-def export_geopdf(classified, out_dir, title="NDTI (scene average)") -> Path:
+def export_geopdf(classified, aoi_gdf, out_dir, title="NDTI (scene average)") -> Path:
     """Write the classified raster + legend as a true georeferenced, colored PDF via rasterio's bundled GDAL.
 
     GDAL's PDF driver only supports CreateCopy (not Create), so an in-memory GeoTIFF is
@@ -156,12 +179,15 @@ def export_geopdf(classified, out_dir, title="NDTI (scene average)") -> Path:
     and appended as extra columns of real RGB pixels alongside the map, so it travels
     inside the same georeferenced file (those legend pixels just carry extrapolated,
     meaningless coordinates past the map's real extent, which is harmless for a report).
+    The AOI boundary is burned directly into the map pixels (there's no vector overlay
+    in a flat raster PDF), so the property line stays visible in the exported map.
     """
     out_dir = Path(out_dir)
     pdf_path = out_dir / "ndti_classified.pdf"
     labels = classified.attrs["labels"]
 
     map_rgb = _classified_to_rgb(classified)
+    map_rgb = _draw_boundary(map_rgb, aoi_gdf, classified.rio.crs, classified.rio.transform())
     legend_rgb = _legend_panel_rgb(labels, title, height_px=map_rgb.shape[0])
     combined = np.hstack([map_rgb, legend_rgb])  # (rows, map_cols + legend_cols, 3)
 

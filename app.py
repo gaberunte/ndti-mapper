@@ -263,7 +263,7 @@ if aoi_gdf is not None and not aoi_gdf.empty:
 
             with st.spinner("Building georeferenced PDF and GeoTIFFs..."):
                 out_dir = tempfile.mkdtemp()
-                pdf_path = export_geopdf(classified, out_dir, title=title)
+                pdf_path = export_geopdf(classified, aoi_gdf, out_dir, title=title)
                 pdf_bytes = pdf_path.read_bytes()
                 classified_tif_bytes = export_geotiff(classified, out_dir).read_bytes()
                 ndti_tif_bytes = export_ndti_geotiff(ndti_composite, out_dir).read_bytes()
