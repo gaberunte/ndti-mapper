@@ -14,6 +14,7 @@ from PIL import Image
 from rasterio.features import rasterize
 from rasterio.io import MemoryFile
 from rasterio.shutil import copy as rio_copy
+from rasterio.transform import array_bounds, from_bounds
 
 # Diverging brown -> teal colormap (bare -> high residue), same family as the original
 # fixed 4-color palette but sampled to fit however many classes are actually in use.
@@ -22,8 +23,10 @@ NODATA_BYTE = 255
 # Fill for pixels inside the AOI that have no valid class (cloud-masked, non-grassland
 # under the land-cover mask, etc.) -- distinct from the plain white/transparent background
 # outside the AOI, so "no data here" doesn't read the same as "not part of the property."
-_MASKED_COLOR = (204, 204, 204)  # matplotlib "0.8" gray, matched in the raster export
+_MASKED_COLOR = (224, 224, 224)  # matplotlib "0.88" gray, matched in the raster export
+_MASKED_GRAY_MPL = "0.88"
 _MIN_LEGEND_PX = 900  # floor for laying out the legend panel's text, see _legend_panel_rgb
+_MAX_PDF_MAP_DIM = 2000  # cap on the PDF's map width/height in pixels, see export_geopdf
 
 
 def _class_colors(n: int) -> list[str]:
@@ -55,12 +58,12 @@ def render_preview(classified, aoi_gdf, title="NDTI (scene average)"):
     fig, ax = plt.subplots(figsize=(8, 8))
     # Gray AOI fill underneath: the raster's NaN pixels render transparent, so this
     # shows through for masked-out pixels (cloud, non-grassland, ...) inside the AOI.
-    aoi_proj.plot(ax=ax, facecolor="0.8", edgecolor="none", zorder=0)
+    aoi_proj.plot(ax=ax, facecolor=_MASKED_GRAY_MPL, edgecolor="none", zorder=0)
     classified.plot.imshow(ax=ax, cmap=cmap, norm=norm, add_colorbar=False, zorder=1)
     aoi_proj.boundary.plot(ax=ax, edgecolor="black", linewidth=1.2, zorder=2)
 
     handles = [mpatches.Patch(color=colors[i], label=labels[i]) for i in range(n)]
-    handles.append(mpatches.Patch(color="0.8", label="No data (cloud/mask)"))
+    handles.append(mpatches.Patch(color=_MASKED_GRAY_MPL, label="No data (cloud/mask)"))
     ax.legend(handles=handles, loc="lower left", fontsize=8, framealpha=0.9)
     ax.set_title(title)
     ax.set_axis_off()
@@ -236,14 +239,35 @@ def export_geopdf(classified, aoi_gdf, out_dir, title="NDTI (scene average)", me
     in a flat raster PDF), so the property line stays visible in the exported map.
     `metadata_lines`, if given, is printed under the title (e.g. scene dates used, cloud
     cover threshold, resolution) so that context isn't lost once the PDF leaves the app.
+
+    The GDAL PDF driver maps raster pixels to page points 1:1, with no notion of a
+    target page size -- so a large AOI, or one with an oddly-shaped/elongated bounding
+    box, can produce an enormous or absurdly elongated page that squeezes the legend's
+    fixed pixel width down to nothing. The map is capped to `_MAX_PDF_MAP_DIM` on its
+    longer side (nearest-neighbor, so class colors stay exact) before layout, which
+    keeps the page a sane, predictable shape regardless of the AOI's real geometry; the
+    full-resolution GeoTIFF exports are unaffected.
     """
     out_dir = Path(out_dir)
     pdf_path = out_dir / "ndti_classified.pdf"
     labels = classified.attrs["labels"]
+    transform = classified.rio.transform()
 
-    aoi_mask = _aoi_mask(aoi_gdf, classified.rio.crs, classified.rio.transform(), classified.shape)
+    aoi_mask = _aoi_mask(aoi_gdf, classified.rio.crs, transform, classified.shape)
     map_rgb = _classified_to_rgb(classified, aoi_mask=aoi_mask)
-    map_rgb = _draw_boundary(map_rgb, aoi_gdf, classified.rio.crs, classified.rio.transform())
+
+    orig_h, orig_w = map_rgb.shape[:2]
+    scale = _MAX_PDF_MAP_DIM / max(orig_h, orig_w)
+    if scale < 1:
+        # Downscale before drawing the boundary: a hairline burned in at full resolution
+        # can be aliased away entirely by a large nearest-neighbor downsample, so it's
+        # drawn fresh on the final grid instead, at a consistent width regardless of scale.
+        new_w, new_h = max(1, round(orig_w * scale)), max(1, round(orig_h * scale))
+        map_rgb = np.array(Image.fromarray(map_rgb).resize((new_w, new_h), Image.NEAREST))
+        bounds = array_bounds(orig_h, orig_w, transform)
+        transform = from_bounds(*bounds, new_w, new_h)
+
+    map_rgb = _draw_boundary(map_rgb, aoi_gdf, classified.rio.crs, transform)
     legend_rgb = _legend_panel_rgb(labels, title, height_px=map_rgb.shape[0], metadata_lines=metadata_lines)
     combined = np.hstack([map_rgb, legend_rgb])  # (rows, map_cols + legend_cols, 3)
 
@@ -254,7 +278,7 @@ def export_geopdf(classified, aoi_gdf, out_dir, title="NDTI (scene average)", me
         count=3,
         dtype="uint8",
         crs=classified.rio.crs,
-        transform=classified.rio.transform(),
+        transform=transform,
     )
 
     with MemoryFile() as memfile:
