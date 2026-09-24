@@ -71,21 +71,23 @@ def render_preview(classified, aoi_gdf, title="NDTI (scene average)"):
     return fig
 
 
-def _wrap_to_width(fig, text, fontsize, max_width_px, **text_kwargs):
-    """Word-wrap `text` to fit `max_width_px`, measured with the actual font metrics.
-
-    A fixed character count doesn't track physical width (bold/varying-width glyphs,
-    different font sizes), which was letting titles/metadata overflow the legend panel
-    and get clipped at its edge. This measures each trial line with the real renderer.
-    """
+def _text_width_px(fig, text, fontsize, **text_kwargs):
+    """Measure `text`'s rendered width in pixels at `fontsize`, using the real renderer
+    (font metrics vary by weight/size/glyph, so a character count can't stand in for this)."""
     renderer = fig.canvas.get_renderer()
+    probe = fig.text(0, 0, text, fontsize=fontsize, **text_kwargs)
+    width = probe.get_window_extent(renderer=renderer).width
+    probe.remove()
+    return width
+
+
+def _wrap_to_width(fig, text, fontsize, max_width_px, **text_kwargs):
+    """Word-wrap `text` to fit `max_width_px`, measured with the actual font metrics."""
     lines = []
     current = ""
     for word in text.split():
         trial = f"{current} {word}".strip()
-        probe = fig.text(0, 0, trial, fontsize=fontsize, **text_kwargs)
-        width = probe.get_window_extent(renderer=renderer).width
-        probe.remove()
+        width = _text_width_px(fig, trial, fontsize, **text_kwargs)
         if current and width > max_width_px:
             lines.append(current)
             current = word
@@ -96,16 +98,37 @@ def _wrap_to_width(fig, text, fontsize, max_width_px, **text_kwargs):
     return lines or [text]
 
 
-def _legend_panel_rgb(labels, title, height_px, metadata_lines=None, width_px=220, dpi=150):
+def _legend_panel_rgb(labels, title, height_px, metadata_lines=None, min_width_px=220, dpi=150):
     """Render a title + metadata + color-swatch legend as an RGB array, resized to exactly height_px tall.
 
-    Text is laid out on a canvas at least `_MIN_LEGEND_PX` tall, then scaled to fit
-    `height_px` -- a raster with few rows (small AOI, coarse resolution) would otherwise
-    give fixed-size fonts too little room, clipping the legend off the bottom.
+    Text is laid out on a canvas at least `_MIN_LEGEND_PX` tall, then uniformly scaled to
+    fit `height_px` (preserving aspect ratio, so nothing looks stretched) -- a raster with
+    few rows (small AOI, coarse resolution) would otherwise give fixed-size fonts too
+    little room, clipping the legend off the bottom.
+
+    The legend's own color-swatch rows are drawn manually rather than via matplotlib's
+    `ax.legend()`, which doesn't know the panel's pixel width and would just let long
+    labels (e.g. "No data (cloud/mask)") run past its edge and get clipped. The panel's
+    width is instead measured from the actual content up front, so it's always wide
+    enough for the widest legend label (title/metadata wrap onto multiple lines instead).
     """
     n = len(labels)
     colors = _class_colors(n)
+    legend_labels = list(labels) + ["No data (cloud/mask)"]
+    legend_colors = colors + [to_hex([c / 255 for c in _MASKED_COLOR])]
     render_px = max(height_px, _MIN_LEGEND_PX)
+
+    left_margin_px, right_margin_px = 14, 14
+    swatch_w_px, swatch_gap_px = 26, 8
+
+    probe_fig = plt.figure(figsize=(1, 1), dpi=dpi)
+    max_label_px = max(_text_width_px(probe_fig, lbl, 7.5) for lbl in legend_labels)
+    plt.close(probe_fig)
+
+    content_w_px = left_margin_px + swatch_w_px + swatch_gap_px + max_label_px + right_margin_px
+    width_px = max(min_width_px, round(content_w_px))
+    max_text_width_px = width_px - left_margin_px - right_margin_px
+
     fig = plt.figure(figsize=(width_px / dpi, render_px / dpi), dpi=dpi)
     fig.patch.set_facecolor("white")
     ax = fig.add_axes((0, 0, 1, 1))
@@ -113,8 +136,7 @@ def _legend_panel_rgb(labels, title, height_px, metadata_lines=None, width_px=22
     ax.set_ylim(0, 1)
     ax.axis("off")
 
-    left_margin = 0.08
-    max_text_width_px = width_px * (1 - left_margin - 0.05)
+    left_frac = left_margin_px / width_px
 
     # Line heights are computed as an axis-coordinate fraction (rather than a fixed
     # constant) so stacked text blocks don't collide regardless of the render height.
@@ -123,7 +145,7 @@ def _legend_panel_rgb(labels, title, height_px, metadata_lines=None, width_px=22
 
     y = 0.95
     title_lines = _wrap_to_width(fig, title, 10, max_text_width_px, fontweight="bold")
-    ax.text(left_margin, y, "\n".join(title_lines), fontsize=10, fontweight="bold", va="top")
+    ax.text(left_frac, y, "\n".join(title_lines), fontsize=10, fontweight="bold", va="top")
     y -= line_frac(10) * len(title_lines) + line_frac(10) * 0.6
 
     if metadata_lines:
@@ -132,19 +154,30 @@ def _legend_panel_rgb(labels, title, height_px, metadata_lines=None, width_px=22
             for raw in metadata_lines
             for line in _wrap_to_width(fig, raw, 6, max_text_width_px, color="0.25")
         ]
-        ax.text(left_margin, y, "\n".join(wrapped), fontsize=6, va="top", color="0.25", linespacing=1.6)
+        ax.text(left_frac, y, "\n".join(wrapped), fontsize=6, va="top", color="0.25", linespacing=1.6)
         y -= line_frac(6, leading=1.6) * len(wrapped) + line_frac(6) * 1.2
 
-    handles = [mpatches.Patch(color=colors[i], label=labels[i]) for i in range(n)]
-    handles.append(mpatches.Patch(color=to_hex([c / 255 for c in _MASKED_COLOR]), label="No data (cloud/mask)"))
-    ax.legend(handles=handles, loc="upper left", bbox_to_anchor=(0.0, max(0.03, y)), frameon=False, fontsize=7.5)
+    y -= line_frac(7.5) * 0.6
+    row_h = line_frac(7.5, leading=1.8)
+    swatch_w_frac = swatch_w_px / width_px
+    text_x_frac = (left_margin_px + swatch_w_px + swatch_gap_px) / width_px
+    for color, label in zip(legend_colors, legend_labels):
+        ax.add_patch(
+            mpatches.Rectangle((left_frac, y - row_h * 0.75), swatch_w_frac, row_h * 0.5, facecolor=color)
+        )
+        ax.text(text_x_frac, y - row_h * 0.5, label, fontsize=7.5, va="center", ha="left")
+        y -= row_h
 
     fig.canvas.draw()
     panel = np.asarray(fig.canvas.buffer_rgba())[:, :, :3]
     plt.close(fig)
 
     if panel.shape[0] != height_px:
-        panel = np.array(Image.fromarray(panel).resize((panel.shape[1], height_px)))
+        # Scale both dimensions by the same factor -- resizing only the height (as a
+        # naive fit-to-height would) stretches everything non-uniformly.
+        scale = height_px / panel.shape[0]
+        new_w = max(1, round(panel.shape[1] * scale))
+        panel = np.array(Image.fromarray(panel).resize((new_w, height_px)))
     return panel
 
 
