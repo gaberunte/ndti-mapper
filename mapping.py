@@ -24,7 +24,11 @@ NODATA_BYTE = 255
 # outside the AOI, so "no data here" doesn't read the same as "not part of the property."
 _MASKED_COLOR = (224, 224, 224)  # matplotlib "0.88" gray, matched in the raster export
 _MASKED_GRAY_MPL = "0.88"
-_MIN_LEGEND_PX = 900  # floor for laying out the legend panel's text, see _legend_panel_rgb
+_LEGEND_DPI = 300  # render density for the legend panel's text -- unlike the map (bounded
+# by the source imagery's real resolution), text has no such ceiling, so this is set high
+# for print-quality glyphs rather than matching the map's pixel density.
+_MIN_LEGEND_HEIGHT_IN = 6.0  # floor (in inches) for laying out the legend panel's text,
+# see _legend_panel_rgb -- expressed in inches (not pixels) so it scales with _LEGEND_DPI.
 _MAX_PDF_MAP_DIM = 2000  # cap on the PDF's map width/height in pixels, see export_geopdf
 
 
@@ -98,13 +102,16 @@ def _wrap_to_width(fig, text, fontsize, max_width_px, **text_kwargs):
     return lines or [text]
 
 
-def _legend_panel_rgb(labels, title, height_px, metadata_lines=None, min_width_px=220, dpi=150):
+def _legend_panel_rgb(labels, title, height_px, metadata_lines=None, min_width_px=220, dpi=_LEGEND_DPI):
     """Render a title + metadata + color-swatch legend as an RGB array, resized to exactly height_px tall.
 
-    Text is laid out on a canvas at least `_MIN_LEGEND_PX` tall, then uniformly scaled to
-    fit `height_px` (preserving aspect ratio, so nothing looks stretched) -- a raster with
-    few rows (small AOI, coarse resolution) would otherwise give fixed-size fonts too
-    little room, clipping the legend off the bottom.
+    Text is laid out on a canvas at least `_MIN_LEGEND_HEIGHT_IN` tall, then uniformly
+    scaled to fit `height_px` (preserving aspect ratio, so nothing looks stretched) -- a
+    raster with few rows (small AOI, coarse resolution) would otherwise give fixed-size
+    fonts too little room, clipping the legend off the bottom. `dpi` defaults high (see
+    `_LEGEND_DPI`) since this is the one part of the export not bounded by imagery
+    resolution -- downscaling from a dense render gives properly antialiased, print-quality
+    text rather than the comparatively blocky/soft result of rendering at screen density.
 
     The legend's own color-swatch rows are drawn manually rather than via matplotlib's
     `ax.legend()`, which doesn't know the panel's pixel width and would just let long
@@ -116,10 +123,16 @@ def _legend_panel_rgb(labels, title, height_px, metadata_lines=None, min_width_p
     colors = _class_colors(n)
     legend_labels = list(labels) + ["No data (cloud/mask)"]
     legend_colors = colors + [to_hex([c / 255 for c in _MASKED_COLOR])]
-    render_px = max(height_px, _MIN_LEGEND_PX)
+    render_px = max(height_px, round(_MIN_LEGEND_HEIGHT_IN * dpi))
 
-    left_margin_px, right_margin_px = 14, 14
-    swatch_w_px, swatch_gap_px = 26, 8
+    # Margins/swatch size are defined in points (a physical, dpi-independent unit, same
+    # as fontsize) and converted to pixels for this dpi, so layout proportions stay the
+    # same regardless of how dense the render is -- only converting to raw pixels here
+    # would leave them a fixed, effectively shrinking size as dpi (and thus text) grows.
+    left_margin_px = round(6.7 * dpi / 72)
+    right_margin_px = round(6.7 * dpi / 72)
+    swatch_w_px = round(12.5 * dpi / 72)
+    swatch_gap_px = round(3.8 * dpi / 72)
 
     probe_fig = plt.figure(figsize=(1, 1), dpi=dpi)
     max_label_px = max(_text_width_px(probe_fig, lbl, 7.5) for lbl in legend_labels)
@@ -174,10 +187,12 @@ def _legend_panel_rgb(labels, title, height_px, metadata_lines=None, min_width_p
 
     if panel.shape[0] != height_px:
         # Scale both dimensions by the same factor -- resizing only the height (as a
-        # naive fit-to-height would) stretches everything non-uniformly.
+        # naive fit-to-height would) stretches everything non-uniformly. LANCZOS (rather
+        # than the default filter) is what makes the high `dpi` render above pay off as
+        # properly antialiased text once downscaled to the map's actual pixel height.
         scale = height_px / panel.shape[0]
         new_w = max(1, round(panel.shape[1] * scale))
-        panel = np.array(Image.fromarray(panel).resize((new_w, height_px)))
+        panel = np.array(Image.fromarray(panel).resize((new_w, height_px), Image.LANCZOS))
     return panel
 
 
