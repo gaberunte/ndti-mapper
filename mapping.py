@@ -24,11 +24,10 @@ NODATA_BYTE = 255
 # outside the AOI, so "no data here" doesn't read the same as "not part of the property."
 _MASKED_COLOR = (224, 224, 224)  # matplotlib "0.88" gray, matched in the raster export
 _MASKED_GRAY_MPL = "0.88"
-_LEGEND_DPI = 300  # render density for the legend panel's text -- unlike the map (bounded
-# by the source imagery's real resolution), text has no such ceiling, so this is set high
-# for print-quality glyphs rather than matching the map's pixel density.
-_MIN_LEGEND_HEIGHT_IN = 6.0  # floor (in inches) for laying out the legend panel's text,
-# see _legend_panel_rgb -- expressed in inches (not pixels) so it scales with _LEGEND_DPI.
+_PDF_DPI = 200  # render density for the legend panel's text AND the declared pixel density
+# of the exported PDF page (see export_geopdf) -- kept as one constant so the two always
+# agree; a mismatch would mean the legend's real pixel data doesn't match what the PDF
+# claims about itself, defeating the point of declaring a DPI at all.
 _MAX_PDF_MAP_DIM = 2000  # cap on the PDF's map width/height in pixels, see export_geopdf
 
 
@@ -102,16 +101,15 @@ def _wrap_to_width(fig, text, fontsize, max_width_px, **text_kwargs):
     return lines or [text]
 
 
-def _legend_panel_rgb(labels, title, height_px, metadata_lines=None, min_width_px=220, dpi=_LEGEND_DPI):
-    """Render a title + metadata + color-swatch legend as an RGB array, resized to exactly height_px tall.
-
-    Text is laid out on a canvas at least `_MIN_LEGEND_HEIGHT_IN` tall, then uniformly
-    scaled to fit `height_px` (preserving aspect ratio, so nothing looks stretched) -- a
-    raster with few rows (small AOI, coarse resolution) would otherwise give fixed-size
-    fonts too little room, clipping the legend off the bottom. `dpi` defaults high (see
-    `_LEGEND_DPI`) since this is the one part of the export not bounded by imagery
-    resolution -- downscaling from a dense render gives properly antialiased, print-quality
-    text rather than the comparatively blocky/soft result of rendering at screen density.
+def _legend_panel_rgb(labels, title, metadata_lines=None, min_width_px=220, dpi=_PDF_DPI):
+    """Render a title + metadata + color-swatch legend as an RGB array, sized to fit its
+    own content at `dpi` -- NOT squished to match the map's pixel height. A small/coarse
+    AOI can easily have far fewer map rows than a legend needs for legible text, and
+    forcing the legend into that unrelated pixel budget (as an earlier version of this
+    function did, rescaling the whole panel down to height_px) is what actually caused
+    the legend to look consistently low-resolution, independent of how much detail was
+    rendered internally beforehand. `export_geopdf` reconciles the resulting height
+    mismatch by padding the shorter of map/legend with whitespace, not by rescaling.
 
     The legend's own color-swatch rows are drawn manually rather than via matplotlib's
     `ax.legend()`, which doesn't know the panel's pixel width and would just let long
@@ -123,76 +121,68 @@ def _legend_panel_rgb(labels, title, height_px, metadata_lines=None, min_width_p
     colors = _class_colors(n)
     legend_labels = list(labels) + ["No data (cloud/mask)"]
     legend_colors = colors + [to_hex([c / 255 for c in _MASKED_COLOR])]
-    render_px = max(height_px, round(_MIN_LEGEND_HEIGHT_IN * dpi))
 
-    # Margins/swatch size are defined in points (a physical, dpi-independent unit, same
-    # as fontsize) and converted to pixels for this dpi, so layout proportions stay the
-    # same regardless of how dense the render is -- only converting to raw pixels here
-    # would leave them a fixed, effectively shrinking size as dpi (and thus text) grows.
+    # Margins/sizes are defined in points (a physical, dpi-independent unit, same as
+    # fontsize) and converted to pixels for this dpi, so proportions stay correct
+    # regardless of how dense the render is.
     left_margin_px = round(6.7 * dpi / 72)
     right_margin_px = round(6.7 * dpi / 72)
+    top_margin_px = round(10 * dpi / 72)
+    bottom_margin_px = round(10 * dpi / 72)
     swatch_w_px = round(12.5 * dpi / 72)
     swatch_gap_px = round(3.8 * dpi / 72)
 
     probe_fig = plt.figure(figsize=(1, 1), dpi=dpi)
     max_label_px = max(_text_width_px(probe_fig, lbl, 7.5) for lbl in legend_labels)
-    plt.close(probe_fig)
-
-    content_w_px = left_margin_px + swatch_w_px + swatch_gap_px + max_label_px + right_margin_px
-    width_px = max(min_width_px, round(content_w_px))
+    width_px = max(min_width_px, round(left_margin_px + swatch_w_px + swatch_gap_px + max_label_px + right_margin_px))
     max_text_width_px = width_px - left_margin_px - right_margin_px
 
-    fig = plt.figure(figsize=(width_px / dpi, render_px / dpi), dpi=dpi)
+    title_lines = _wrap_to_width(probe_fig, title, 10, max_text_width_px, fontweight="bold")
+    metadata_wrapped = [
+        line
+        for raw in (metadata_lines or [])
+        for line in _wrap_to_width(probe_fig, raw, 6, max_text_width_px, color="0.25")
+    ]
+    plt.close(probe_fig)
+
+    def line_h(fontsize, leading):
+        return fontsize * dpi / 72 * leading
+
+    title_line_h = line_h(10, 1.35)
+    meta_line_h = line_h(6, 1.6)
+    row_h = line_h(7.5, 1.8)
+
+    content_h = title_line_h * len(title_lines) + title_line_h * 0.6
+    if metadata_wrapped:
+        content_h += meta_line_h * len(metadata_wrapped) + meta_line_h * 1.2
+    content_h += row_h * 0.6 + row_h * len(legend_labels)
+    height_px = max(1, round(top_margin_px + content_h + bottom_margin_px))
+
+    fig = plt.figure(figsize=(width_px / dpi, height_px / dpi), dpi=dpi)
     fig.patch.set_facecolor("white")
     ax = fig.add_axes((0, 0, 1, 1))
-    ax.set_xlim(0, 1)
-    ax.set_ylim(0, 1)
+    ax.set_xlim(0, width_px)
+    ax.set_ylim(height_px, 0)  # y increases downward, matching the top-down layout below
     ax.axis("off")
 
-    left_frac = left_margin_px / width_px
+    y = top_margin_px
+    ax.text(left_margin_px, y, "\n".join(title_lines), fontsize=10, fontweight="bold", va="top")
+    y += title_line_h * len(title_lines) + title_line_h * 0.6
 
-    # Line heights are computed as an axis-coordinate fraction (rather than a fixed
-    # constant) so stacked text blocks don't collide regardless of the render height.
-    def line_frac(fontsize, leading=1.35):
-        return fontsize * dpi / 72 * leading / render_px
+    if metadata_wrapped:
+        ax.text(left_margin_px, y, "\n".join(metadata_wrapped), fontsize=6, va="top", color="0.25", linespacing=1.6)
+        y += meta_line_h * len(metadata_wrapped) + meta_line_h * 1.2
 
-    y = 0.95
-    title_lines = _wrap_to_width(fig, title, 10, max_text_width_px, fontweight="bold")
-    ax.text(left_frac, y, "\n".join(title_lines), fontsize=10, fontweight="bold", va="top")
-    y -= line_frac(10) * len(title_lines) + line_frac(10) * 0.6
-
-    if metadata_lines:
-        wrapped = [
-            line
-            for raw in metadata_lines
-            for line in _wrap_to_width(fig, raw, 6, max_text_width_px, color="0.25")
-        ]
-        ax.text(left_frac, y, "\n".join(wrapped), fontsize=6, va="top", color="0.25", linespacing=1.6)
-        y -= line_frac(6, leading=1.6) * len(wrapped) + line_frac(6) * 1.2
-
-    y -= line_frac(7.5) * 0.6
-    row_h = line_frac(7.5, leading=1.8)
-    swatch_w_frac = swatch_w_px / width_px
-    text_x_frac = (left_margin_px + swatch_w_px + swatch_gap_px) / width_px
+    y += row_h * 0.6
+    text_x_px = left_margin_px + swatch_w_px + swatch_gap_px
     for color, label in zip(legend_colors, legend_labels):
-        ax.add_patch(
-            mpatches.Rectangle((left_frac, y - row_h * 0.75), swatch_w_frac, row_h * 0.5, facecolor=color)
-        )
-        ax.text(text_x_frac, y - row_h * 0.5, label, fontsize=7.5, va="center", ha="left")
-        y -= row_h
+        ax.add_patch(mpatches.Rectangle((left_margin_px, y + row_h * 0.25), swatch_w_px, row_h * 0.5, facecolor=color))
+        ax.text(text_x_px, y + row_h * 0.5, label, fontsize=7.5, va="center", ha="left")
+        y += row_h
 
     fig.canvas.draw()
     panel = np.asarray(fig.canvas.buffer_rgba())[:, :, :3]
     plt.close(fig)
-
-    if panel.shape[0] != height_px:
-        # Scale both dimensions by the same factor -- resizing only the height (as a
-        # naive fit-to-height would) stretches everything non-uniformly. LANCZOS (rather
-        # than the default filter) is what makes the high `dpi` render above pay off as
-        # properly antialiased text once downscaled to the map's actual pixel height.
-        scale = height_px / panel.shape[0]
-        new_w = max(1, round(panel.shape[1] * scale))
-        panel = np.array(Image.fromarray(panel).resize((new_w, height_px), Image.LANCZOS))
     return panel
 
 
@@ -347,7 +337,21 @@ def export_geopdf(classified, aoi_gdf, out_dir, title="NDTI (scene average)", me
         transform = from_bounds(*bounds, new_w, new_h)
 
     map_rgb = _draw_boundary(map_rgb, aoi_gdf, classified.rio.crs, transform)
-    legend_rgb = _legend_panel_rgb(labels, title, height_px=map_rgb.shape[0], metadata_lines=metadata_lines)
+    legend_rgb = _legend_panel_rgb(labels, title, metadata_lines=metadata_lines)
+
+    # The legend is sized to its own content, not to the map's row count, so the two
+    # rarely match already -- pad the shorter one with white rows (bottom) rather than
+    # rescaling either, which would either blur the legend's text or distort the map.
+    final_h = max(map_rgb.shape[0], legend_rgb.shape[0])
+
+    def pad_to_height(img, height):
+        if img.shape[0] == height:
+            return img
+        pad = np.full((height - img.shape[0], img.shape[1], 3), 255, dtype="uint8")
+        return np.vstack([img, pad])
+
+    map_rgb = pad_to_height(map_rgb, final_h)
+    legend_rgb = pad_to_height(legend_rgb, final_h)
     combined = np.hstack([map_rgb, legend_rgb])  # (rows, map_cols + legend_cols, 3)
 
     profile = dict(
@@ -364,6 +368,11 @@ def export_geopdf(classified, aoi_gdf, out_dir, title="NDTI (scene average)", me
         with memfile.open(**profile) as mem:
             for band in range(3):
                 mem.write(combined[:, :, band], band + 1)
-        rio_copy(memfile.name, str(pdf_path), driver="PDF", GEO_ENCODING="ISO32000")
+        # Without an explicit DPI, GDAL's PDF driver defaults to 72 -- meaning the page's
+        # declared physical size is our pixel count stretched to a 72-pixel-per-inch
+        # footprint, regardless of how much real detail those pixels hold. Declaring the
+        # actual DPI we rendered at keeps the page's physical size matched to its real
+        # pixel density, so a viewer/printer isn't misled into upsampling it further.
+        rio_copy(memfile.name, str(pdf_path), driver="PDF", GEO_ENCODING="ISO32000", DPI=str(_PDF_DPI))
 
     return pdf_path
