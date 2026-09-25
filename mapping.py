@@ -311,11 +311,12 @@ def export_geopdf(classified, aoi_gdf, out_dir, title="NDTI (scene average)", me
 
     The GDAL PDF driver maps raster pixels to page points 1:1, with no notion of a
     target page size -- so a large AOI, or one with an oddly-shaped/elongated bounding
-    box, can produce an enormous or absurdly elongated page that squeezes the legend's
-    fixed pixel width down to nothing. The map is capped to `_MAX_PDF_MAP_DIM` on its
-    longer side (nearest-neighbor, so class colors stay exact) before layout, which
-    keeps the page a sane, predictable shape regardless of the AOI's real geometry; the
-    full-resolution GeoTIFF exports are unaffected.
+    box, can produce an enormous or absurdly elongated page. The map is scaled
+    (nearest-neighbor, so class colors stay exact) to fill up to the legend's natural
+    height rather than leaving dead white space next to it, capped at `_MAX_PDF_MAP_DIM`
+    on either side so neither an oversized AOI nor stretching a small-but-elongated one
+    to match the legend can blow the page up; the full-resolution GeoTIFF exports are
+    unaffected.
     """
     out_dir = Path(out_dir)
     pdf_path = out_dir / "ndti_classified.pdf"
@@ -324,24 +325,32 @@ def export_geopdf(classified, aoi_gdf, out_dir, title="NDTI (scene average)", me
 
     aoi_mask = _aoi_mask(aoi_gdf, classified.rio.crs, transform, classified.shape)
     map_rgb = _classified_to_rgb(classified, aoi_mask=aoi_mask)
+    legend_rgb = _legend_panel_rgb(labels, title, metadata_lines=metadata_lines)
 
     orig_h, orig_w = map_rgb.shape[:2]
-    scale = _MAX_PDF_MAP_DIM / max(orig_h, orig_w)
-    if scale < 1:
-        # Downscale before drawing the boundary: a hairline burned in at full resolution
-        # can be aliased away entirely by a large nearest-neighbor downsample, so it's
-        # drawn fresh on the final grid instead, at a consistent width regardless of scale.
+    # Scale the map to: (a) fill up to the legend's natural height when the map is the
+    # smaller one, so a modest property doesn't leave dead white space next to a full-size
+    # legend (nearest-neighbor keeps it crisp-edged rather than blurring it into the gap);
+    # never shrink the map just because the legend is short, though (min(..., 1.0) only
+    # applies the ceiling side of that). (b) still cap out at _MAX_PDF_MAP_DIM on either
+    # side, which bounds both an oversized AOI and how far a small-but-elongated one gets
+    # stretched trying to reach the legend's height.
+    scale = max(1.0, legend_rgb.shape[0] / orig_h)
+    scale = min(scale, _MAX_PDF_MAP_DIM / orig_h, _MAX_PDF_MAP_DIM / orig_w)
+    if scale != 1.0:
+        # Resize before drawing the boundary: a hairline burned in beforehand can be
+        # aliased away by a large nearest-neighbor downsample, or look inconsistent after
+        # an upsample, so it's drawn fresh on the final grid instead.
         new_w, new_h = max(1, round(orig_w * scale)), max(1, round(orig_h * scale))
         map_rgb = np.array(Image.fromarray(map_rgb).resize((new_w, new_h), Image.NEAREST))
         bounds = array_bounds(orig_h, orig_w, transform)
         transform = from_bounds(*bounds, new_w, new_h)
 
     map_rgb = _draw_boundary(map_rgb, aoi_gdf, classified.rio.crs, transform)
-    legend_rgb = _legend_panel_rgb(labels, title, metadata_lines=metadata_lines)
 
-    # The legend is sized to its own content, not to the map's row count, so the two
-    # rarely match already -- pad the shorter one with white rows (bottom) rather than
-    # rescaling either, which would either blur the legend's text or distort the map.
+    # The legend is sized to its own content and the map to the above, so the two can
+    # still land on slightly different heights (e.g. a very elongated small AOI capped by
+    # width) -- pad whichever is shorter with white rows (bottom) to reconcile.
     final_h = max(map_rgb.shape[0], legend_rgb.shape[0])
 
     def pad_to_height(img, height):
